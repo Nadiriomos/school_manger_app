@@ -1,0 +1,10 @@
+[
+  {
+    "name": "owner",
+    "id": 0,
+    "kdf": "pbkdf2_sha256",
+    "iterations": 200000,
+    "salt": "8bb5e52f5daf7249b591a8c4e0dbffea",
+    "password_hash": "330b00565c57cb36db2ff6010d3147c58454ca9af09c36e59d41feb6b37295cc"
+  }
+]

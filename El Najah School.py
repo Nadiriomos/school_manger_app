@@ -5,6 +5,10 @@ import os
 import sys
 from datetime import datetime
 
+# 1) add this import near the top with the other imports
+import roleperm as rp
+import os
+
 # Data / DB layer
 from DB import (
     init_db,
@@ -81,6 +85,15 @@ try:
         ElNajahSchool.iconbitmap(icon_path)
 except Exception:
     pass
+
+rp.configure(app_name="ElNajahSchool")      # stores files in ./roleperm/
+_role = rp.login(
+    app_name="ElNajahSchool",
+    title="El Najah School Login",
+    logo_text="El Najah School"
+)
+LOGGED_USER = rp.current_username() or "Guest"
+ElNajahSchool.title(f"El Najah School Manager - Logged in as: {LOGGED_USER} (Role: {_role.name if _role else 'N/A'})")
 
 # Geometry
 screen_width = ElNajahSchool.winfo_screenwidth()
@@ -713,7 +726,8 @@ ctk.CTkButton(
     font=("Arial", 16),
 ).pack(side="left", padx=4)
 
-
+@rp.permission_key("open_history", label="open paymants history ")
+@rp.permission_required("open_history")
 def open_history():
     # paymants_log currently expects a global ElNajahSchool. We also pass DB helpers through globals.
     try:
@@ -801,6 +815,18 @@ search_entry.bind("<Return>", on_search_pressed)
 year_menu.configure(command=lambda _value: refresh_treeview_all())
 month_menu.configure(command=lambda _value: refresh_treeview_all())
 group_menu.configure(command=lambda _value: refresh_treeview_all())
+
+def open_roleperm_panel():
+    opened = rp.open_admin_panel(
+        require_reauth=False,              # IMPORTANT: no second login popup
+        title="Roles & Permissions",
+        default_allow_manage=False
+    )
+    if not opened:
+        messagebox.showerror("Access Denied", "You don't have permission: roleperm.manage")
+
+tools_menu.add_separator()
+tools_menu.add_command(label="Roles & Permissions", command=open_roleperm_panel)
 
 # Initial load
 refresh_group_filter()
