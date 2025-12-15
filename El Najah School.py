@@ -9,6 +9,10 @@ from datetime import datetime
 import roleperm as rp
 import os
 
+role = rp.login(app_name="EL-NAJAH-school")
+if role is None:
+    raise SystemExit
+
 # Data / DB layer
 from DB import (
     init_db,
@@ -86,14 +90,6 @@ try:
 except Exception:
     pass
 
-rp.configure(app_name="ElNajahSchool")      # stores files in ./roleperm/
-_role = rp.login(
-    app_name="ElNajahSchool",
-    title="El Najah School Login",
-    logo_text="El Najah School"
-)
-LOGGED_USER = rp.current_username() or "Guest"
-ElNajahSchool.title(f"El Najah School Manager - Logged in as: {LOGGED_USER} (Role: {_role.name if _role else 'N/A'})")
 
 # Geometry
 screen_width = ElNajahSchool.winfo_screenwidth()
@@ -831,6 +827,6 @@ tools_menu.add_command(label="Roles & Permissions", command=open_roleperm_panel)
 # Initial load
 refresh_group_filter()
 refresh_treeview_all()
-
+print("role_id:", rp.current_role_id(), "user:", rp.current_username())
 if __name__ == "__main__":
     ElNajahSchool.mainloop()
