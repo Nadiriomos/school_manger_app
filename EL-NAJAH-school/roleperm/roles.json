@@ -1,0 +1,18 @@
+[
+  {
+    "name": "owner",
+    "id": 0,
+    "kdf": "pbkdf2_sha256",
+    "iterations": 200000,
+    "salt": "5f6c664f9b3b48a183665a5c91592963",
+    "password_hash": "533bc2e8928644da855f4fc23a584b06fe6dd68ba70543d08124905a50ccb64d"
+  },
+  {
+    "name": "admin",
+    "id": 1,
+    "kdf": "pbkdf2_sha256",
+    "iterations": 200000,
+    "salt": "25f167b7d0bedfaad9f8d4b6fa0f54a2",
+    "password_hash": "0814fd97b821fd75cb660f8fe93763b470bf755a0c01e77c2eac9cf3f656ef96"
+  }
+]

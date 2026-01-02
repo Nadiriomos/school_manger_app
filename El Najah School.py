@@ -725,11 +725,9 @@ ctk.CTkButton(
 @rp.permission_key("open_history", label="open paymants history ")
 @rp.permission_required("open_history")
 def open_history():
-    # paymants_log currently expects a global ElNajahSchool. We also pass DB helpers through globals.
     try:
         payments_log.open_full_window()
     except AttributeError:
-        # in the future you may switch to paymants_log.open_history_window(ElNajahSchool)
         try:
             payments_log.open_history_window(ElNajahSchool)
         except Exception as e:
@@ -814,12 +812,13 @@ group_menu.configure(command=lambda _value: refresh_treeview_all())
 
 def open_roleperm_panel():
     opened = rp.open_admin_panel(
-        require_reauth=False,              # IMPORTANT: no second login popup
+        require_reauth=False,              
         title="Roles & Permissions",
-        default_allow_manage=False
+        default_allow_manage=False,
+        ui="ctk"
     )
     if not opened:
-        messagebox.showerror("Access Denied", "You don't have permission: roleperm.manage")
+        messagebox.showerror("Access Denied", "You don't have permission: roleperm.owner")
 
 tools_menu.add_separator()
 tools_menu.add_command(label="Roles & Permissions", command=open_roleperm_panel)
@@ -827,6 +826,11 @@ tools_menu.add_command(label="Roles & Permissions", command=open_roleperm_panel)
 # Initial load
 refresh_group_filter()
 refresh_treeview_all()
+
 print("role_id:", rp.current_role_id(), "user:", rp.current_username())
+print("roles:", rp.get_paths().roles_file)
+print("perms:", rp.get_paths().permissions_file)
+print("role_id:", rp.current_role_id())
+
 if __name__ == "__main__":
     ElNajahSchool.mainloop()

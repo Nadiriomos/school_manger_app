@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "permissions": {
+    "roleperm.manage": {
+      "label": "Manage Roles & Permissions",
+      "allowed_role_ids": []
+    },
+    "open_history": {
+      "label": "open paymants history",
+      "allowed_role_ids": [
+        1
+      ]
+    }
+  }
+}
