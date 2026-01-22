@@ -226,7 +226,7 @@ def open_edit_payment_modal(
     pay_map = {(p.year, p.month): p for p in payments}
 
     win = ctk.CTkToplevel(parent)
-    win.title(...)
+    win.title(f"Edit Payments — {stu.id}: {stu.name}")
     win.geometry("720x620")
 
     try:
@@ -369,9 +369,10 @@ def export_history_pdf(academic_label: str, group_name: str | None) -> None:
         messagebox.showinfo("No data", "There are no rows to export for this selection.")
         return
 
+    os.makedirs("exports", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_group = (group_name or "All").replace(" ", "_")
-    filename = f"payments_history_{academic_label.replace(' ', '').replace('-', '_')}_{safe_group}_{timestamp}.pdf"
+    filename = os.path.join("exports", f"payments_history_{academic_label.replace(' ', '').replace('-', '_')}_{safe_group}_{timestamp}.pdf")
 
     c = canvas.Canvas(filename, pagesize=landscape(A4))
     width, height = landscape(A4)

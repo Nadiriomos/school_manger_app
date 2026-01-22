@@ -270,7 +270,7 @@ def refresh_treeview_all():
 
 
 def on_search_pressed(event=None):
-    refresh_treeview_all()
+    refresh_all()
 
 
 def _get_selected_student_id():
@@ -390,8 +390,7 @@ def open_add_student():
 
         messagebox.showinfo("Student Added", f"Student '{name}' added with ID {sid}.")
         top.destroy()
-        refresh_group_filter()
-        refresh_treeview_all()
+        refresh_all()
 
     save_btn = ctk.CTkButton(btn_frame, text="Save", command=handle_save,
                             fg_color=PRIMARY, hover_color=HOVER)
@@ -438,8 +437,7 @@ def open_add_group():
 
         messagebox.showinfo("Added", f"Group '{name}' created.")
         top.destroy()
-        refresh_group_filter()
-        refresh_treeview_all()
+        refresh_all()
 
     ctk.CTkButton(btn_frame, text="Add", command=handle_add_group, fg_color=PRIMARY, hover_color=HOVER).pack(side="left", padx=4)
     ctk.CTkButton(btn_frame, text="Cancel", command=top.destroy).pack(side="left", padx=4)
@@ -484,8 +482,7 @@ def open_delete_group():
             messagebox.showinfo("Not Found", f"Group '{name}' does not exist.")
         else:
             messagebox.showinfo("Deleted", f"Group '{name}' deleted.")
-            refresh_group_filter()
-            refresh_treeview_all()
+        refresh_all()
         top.destroy()
 
     btn_frame = ctk.CTkFrame(top, fg_color="transparent")
@@ -585,7 +582,7 @@ def open_edit_student_modal():
 
         messagebox.showinfo("Updated", "Student updated successfully.")
         top.destroy()
-        refresh_treeview_all()
+        refresh_all()
 
     ctk.CTkButton(btn_frame, text="Save", command=handle_save, fg_color=PRIMARY, hover_color=HOVER).pack(side="left", padx=4)
     ctk.CTkButton(btn_frame, text="Cancel", command=top.destroy).pack(side="left", padx=4)
@@ -617,7 +614,7 @@ def perform_delete():
     _last_deleted_snapshot = snapshot
     _last_deleted_id = sid
     messagebox.showinfo("Deleted", f"Student {sid} deleted.\nYou can undo this from the 'Undo Delete' button.")
-    refresh_treeview_all()
+    refresh_all()
 
 
 def undo_delete():
@@ -643,7 +640,7 @@ def undo_delete():
     _last_deleted_snapshot = None
     _last_deleted_id = None
     messagebox.showinfo("Restored", f"Student {sid} has been restored.")
-    refresh_treeview_all()
+    refresh_all()
 
 
 # ---------------------------------------------------------------------------
@@ -715,11 +712,9 @@ ctk.CTkButton(
 
 
 def open_history():
-    # paymants_log currently expects a global ElNajahSchool. We also pass DB helpers through globals.
     try:
         payments_log.open_full_window()
     except AttributeError:
-        # in the future you may switch to paymants_log.open_history_window(ElNajahSchool)
         try:
             payments_log.open_history_window(ElNajahSchool)
         except Exception as e:
@@ -789,22 +784,28 @@ menubar.add_cascade(label="Help", menu=help_menu)
 # ---------------------------------------------------------------------------
 
 # Many functions inside menu_tools/paymants_log expect these to exist as globals
+
+def refresh_all():
+    refresh_group_filter()
+    refresh_treeview_all()
+
 menu_tools.ElNajahSchool = ElNajahSchool
 menu_tools.refresh_treeview_all = refresh_treeview_all
 menu_tools.get_all_groups = get_all_groups
+menu_tools.refresh_all = refresh_all
 
 payments_log.ElNajahSchool = ElNajahSchool
 payments_log.get_all_groups = get_all_groups
+payments_log.refresh_all = refresh_all
 
 # Bindings
 search_entry.bind("<Return>", on_search_pressed)
-year_menu.configure(command=lambda _value: refresh_treeview_all())
-month_menu.configure(command=lambda _value: refresh_treeview_all())
-group_menu.configure(command=lambda _value: refresh_treeview_all())
+year_menu.configure(command=lambda _value: refresh_all())
+month_menu.configure(command=lambda _value: refresh_all())
+group_menu.configure(command=lambda _value: refresh_all())
 
 # Initial load
-refresh_group_filter()
-refresh_treeview_all()
+refresh_all()
 
 if __name__ == "__main__":
     ElNajahSchool.mainloop()
