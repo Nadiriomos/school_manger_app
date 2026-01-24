@@ -27,6 +27,7 @@ from DB import (
 
 import menu_tools
 import payments_log
+import schedule
 
 
 # ---------------------------------------------------------------------------
@@ -404,19 +405,35 @@ def open_add_student():
 def open_add_group(parent=None):
     top = ctk.CTkToplevel(parent or ElNajahSchool)
     top.title("Add Group")
-    top.geometry("360x160")
+    top.geometry("565x620")  
+
     try:
         top.grab_set()
     except tk.TclError:
         top.focus_force()
     top.focus_force()
 
-    ctk.CTkLabel(top, text="New Group Name:", font=("Arial", 16)).pack(pady=(16, 8))
-    entry = ctk.CTkEntry(top)
-    entry.pack(padx=16, pady=(0, 12), fill="x")
+    # --- Main container (use pack consistently)
+    container = ctk.CTkFrame(top, fg_color="transparent")
+    container.pack(fill="both", expand=True, padx=16, pady=16)
 
-    btn_frame = ctk.CTkFrame(top, fg_color="transparent")
-    btn_frame.pack(pady=4)
+    ctk.CTkLabel(container, text="New Group Name:", font=("Arial", 16)).pack(anchor="w", pady=(0, 8))
+    entry = ctk.CTkEntry(container)
+    entry.pack(fill="x", pady=(0, 12))
+
+    # -----------------------------
+    # Extension Zone (Plugin Mount)
+    # -----------------------------
+    ext_zone = ctk.CTkFrame(container, fg_color="transparent")
+    ext_zone.pack(fill="x", pady=(8, 12))
+
+    # Mount schedule plugin UI inside ext_zone
+    # (Make sure you have: import schedule at the top of the file)
+    schedule_validate, schedule_apply = schedule.attach_group_schedule_extension(ext_zone)
+
+    # Buttons
+    btn_frame = ctk.CTkFrame(container, fg_color="transparent")
+    btn_frame.pack(fill="x", pady=(8, 0))
 
     def handle_add_group():
         from DB import create_group
@@ -424,11 +441,21 @@ def open_add_group(parent=None):
         if not name:
             messagebox.showerror("Error", "Group name cannot be empty.")
             return
+
+        # Plugin validate (schedule UI)
+        if schedule_validate and not schedule_validate():
+            return
+
         try:
             create_group(name)
         except AlreadyExistsError as e:
             messagebox.showerror("Error", str(e))
             return
+
+        # Plugin apply (returns dict for now; no DB writes yet)
+        schedule_payload = schedule_apply() if schedule_apply else None
+        print("SCHEDULE PAYLOAD (TEST):", schedule_payload)
+
         messagebox.showinfo("Added", f"Group '{name}' created.")
         top.destroy()
         refresh_all()
