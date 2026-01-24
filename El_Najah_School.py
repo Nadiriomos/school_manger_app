@@ -20,6 +20,7 @@ from DB import (
     set_student_groups,
     get_all_groups,
     get_students_with_payment_for_month,
+    get_student_counts_by_group,
     get_payment,
     upsert_payment,
 )
@@ -400,18 +401,14 @@ def open_add_student():
     cancel_btn.pack(side="left", padx=4)
 
 
-def open_add_group():
-    """
-    Popup to create a new group.
-    """
-    top = ctk.CTkToplevel(ElNajahSchool)
+def open_add_group(parent=None):
+    top = ctk.CTkToplevel(parent or ElNajahSchool)
     top.title("Add Group")
     top.geometry("360x160")
     try:
         top.grab_set()
     except tk.TclError:
         top.focus_force()
-
     top.focus_force()
 
     ctk.CTkLabel(top, text="New Group Name:", font=("Arial", 16)).pack(pady=(16, 8))
@@ -422,19 +419,16 @@ def open_add_group():
     btn_frame.pack(pady=4)
 
     def handle_add_group():
-        from DB import create_group, delete_group_by_name  # local import to avoid circulars
-
+        from DB import create_group
         name = entry.get().strip()
         if not name:
             messagebox.showerror("Error", "Group name cannot be empty.")
             return
-
         try:
             create_group(name)
         except AlreadyExistsError as e:
             messagebox.showerror("Error", str(e))
             return
-
         messagebox.showinfo("Added", f"Group '{name}' created.")
         top.destroy()
         refresh_all()
@@ -442,21 +436,18 @@ def open_add_group():
     ctk.CTkButton(btn_frame, text="Add", command=handle_add_group, fg_color=PRIMARY, hover_color=HOVER).pack(side="left", padx=4)
     ctk.CTkButton(btn_frame, text="Cancel", command=top.destroy).pack(side="left", padx=4)
 
+    return top
 
-def open_delete_group():
-    """
-    Popup to delete an existing group by name.
-    """
+def open_delete_group(default_name=None, parent=None):
     from DB import delete_group_by_name
 
-    top = ctk.CTkToplevel(ElNajahSchool)
+    top = ctk.CTkToplevel(parent or ElNajahSchool)
     top.title("Delete Group")
     top.geometry("360x180")
     try:
         top.grab_set()
     except tk.TclError:
         top.focus_force()
-
     top.focus_force()
 
     ctk.CTkLabel(top, text="Delete Group", font=("Arial", 16, "bold")).pack(pady=(12, 4))
@@ -465,16 +456,16 @@ def open_delete_group():
     entry = ctk.CTkEntry(top)
     entry.pack(padx=16, pady=8, fill="x")
 
+    if default_name:
+        entry.insert(0, default_name)
+
     def handle_delete():
         name = entry.get().strip()
         if not name:
             messagebox.showerror("Error", "Group name is required.")
             return
 
-        if not messagebox.askyesno(
-            "Confirm Delete",
-            f"Delete group '{name}'?\nThis will unlink it from all students."
-        ):
+        if not messagebox.askyesno("Confirm Delete", f"Delete group '{name}'?\nThis will unlink it from all students."):
             return
 
         ok = delete_group_by_name(name)
@@ -490,6 +481,97 @@ def open_delete_group():
     ctk.CTkButton(btn_frame, text="Delete", command=handle_delete, fg_color="#DC2626").pack(side="left", padx=4)
     ctk.CTkButton(btn_frame, text="Cancel", command=top.destroy).pack(side="left", padx=4)
 
+    return top
+
+def open_manage_groups():
+    win = ctk.CTkToplevel(ElNajahSchool)
+    win.title("Manage Groups")
+    win.geometry("760x480")
+
+    try:
+        win.grab_set()
+    except tk.TclError:
+        win.focus_force()
+    win.focus_force()
+
+    root = ctk.CTkFrame(win, fg_color="transparent")
+    root.pack(fill="both", expand=True, padx=12, pady=12)
+
+    # Left panel (buttons)
+    left = ctk.CTkFrame(root, width=180, fg_color="white")
+    left.pack(side="left", fill="y", padx=(0, 10))
+    left.pack_propagate(False)
+
+    ctk.CTkLabel(left, text="Groups", font=("Arial", 16, "bold")).pack(pady=(14, 10))
+
+    # Right panel (tree)
+    right = ctk.CTkFrame(root, fg_color="white")
+    right.pack(side="left", fill="both", expand=True)
+
+    groups_tree = ttk.Treeview(right, columns=("group", "count"), show="headings")
+    groups_tree.heading("group", text="Group")
+    groups_tree.heading("count", text="Students")
+
+    groups_tree.column("group", width=320, anchor="w")
+    groups_tree.column("count", width=90, anchor="center")
+
+    yscroll = ttk.Scrollbar(right, orient="vertical", command=groups_tree.yview)
+    groups_tree.configure(yscrollcommand=yscroll.set)
+
+    groups_tree.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
+    yscroll.pack(side="left", fill="y", pady=10, padx=(0, 10))
+
+    def refresh_groups_tree():
+        groups_tree.delete(*groups_tree.get_children())
+
+        # Build {"GroupName": count}
+        counts_map = {
+            r["group"]: r["count"]
+            for r in get_student_counts_by_group()
+            if r.get("group") != "TOTAL"
+        }
+
+        for gname in get_all_groups():
+            groups_tree.insert("", "end", values=(gname, counts_map.get(gname, 0)))
+
+    def selected_group_name():
+        sel = groups_tree.selection()
+        if not sel:
+            return None
+        vals = groups_tree.item(sel[0], "values")
+        return vals[0] if vals else None
+
+    def on_add():
+        child = open_add_group(parent=win)
+        try:
+            win.wait_window(child)
+        except Exception:
+            pass
+        refresh_groups_tree()
+        refresh_all()
+
+    def on_delete():
+        name = selected_group_name()
+        if not name:
+            messagebox.showerror("No selection", "Select a group to delete.")
+            return
+        child = open_delete_group(default_name=name, parent=win)
+        try:
+            win.wait_window(child)
+        except Exception:
+            pass
+        refresh_groups_tree()
+        refresh_all()
+
+    ctk.CTkButton(left, text="Add Group", command=on_add, fg_color=PRIMARY, hover_color=HOVER).pack(
+        fill="x", padx=10, pady=(0, 8)
+    )
+    ctk.CTkButton(left, text="Delete Group", command=on_delete, fg_color="#DC2626", hover_color="#B91C1C").pack(
+        fill="x", padx=10, pady=(0, 8)
+    )
+    ctk.CTkButton(left, text="Close", command=win.destroy).pack(fill="x", padx=10, pady=(18, 0))
+
+    refresh_groups_tree()
 
 def open_edit_student_modal():
     """
@@ -662,18 +744,8 @@ ctk.CTkButton(
 
 ctk.CTkButton(
     bottom_frame,
-    text="Add Group",
-    command=open_add_group,
-    fg_color=SECONDARY,
-    hover_color=HOVER,
-    text_color="white",
-    font=("Arial", 16),
-).pack(side="left", padx=4)
-
-ctk.CTkButton(
-    bottom_frame,
-    text="Delete Group",
-    command=open_delete_group,
+    text="Manage Groups",
+    command=open_manage_groups,
     fg_color=SECONDARY,
     hover_color=HOVER,
     text_color="white",
