@@ -72,6 +72,7 @@ _last_deleted_id = None
 # ---------------------------------------------------------------------------
 
 init_db()  # ensure DB schema exists
+schedule.init_attendance_tables()
 
 ElNajahSchool = ctk.CTk()
 ElNajahSchool.title("El Najah School Manager")
@@ -421,9 +422,6 @@ def open_add_group(parent=None):
     entry = ctk.CTkEntry(container)
     entry.pack(fill="x", pady=(0, 12))
 
-    # -----------------------------
-    # Extension Zone (Plugin Mount)
-    # -----------------------------
     ext_zone = ctk.CTkFrame(container, fg_color="transparent")
     ext_zone.pack(fill="x", pady=(8, 12))
 
@@ -442,19 +440,31 @@ def open_add_group(parent=None):
             messagebox.showerror("Error", "Group name cannot be empty.")
             return
 
-        # Plugin validate (schedule UI)
+        # Plugin validate
         if schedule_validate and not schedule_validate():
             return
 
         try:
-            create_group(name)
+            group_id = create_group(name)   # <-- IMPORTANT: capture returned group id
         except AlreadyExistsError as e:
             messagebox.showerror("Error", str(e))
             return
 
-        # Plugin apply (returns dict for now; no DB writes yet)
+        # Plugin apply -> payload or None
         schedule_payload = schedule_apply() if schedule_apply else None
-        print("SCHEDULE PAYLOAD (TEST):", schedule_payload)
+
+        # Save schedule + generate sessions
+        try:
+            schedule.save_group_schedule_and_regenerate(group_id, schedule_payload)
+        except Exception as e:
+            from DB import delete_group  
+            try:
+                delete_group(group_id)
+            except Exception:
+                pass
+            messagebox.showerror("Schedule Error", f"Schedule save failed:\n{e}\n(Group creation was rolled back.)")
+            return
+
 
         messagebox.showinfo("Added", f"Group '{name}' created.")
         top.destroy()
@@ -465,8 +475,10 @@ def open_add_group(parent=None):
 
     return top
 
-def open_delete_group(default_name=None, parent=None):
-    from DB import delete_group_by_name
+def open_delete_group(parent=None, preset_group_name: str | None = None, skip_popup: bool = False):
+    # If caller already has the group name, skip the entry popup entirely.
+    if skip_popup and preset_group_name:
+        return delete_group_flow(preset_group_name, parent=parent)
 
     top = ctk.CTkToplevel(parent or ElNajahSchool)
     top.title("Delete Group")
@@ -477,38 +489,53 @@ def open_delete_group(default_name=None, parent=None):
         top.focus_force()
     top.focus_force()
 
-    ctk.CTkLabel(top, text="Delete Group", font=("Arial", 16, "bold")).pack(pady=(12, 4))
-    ctk.CTkLabel(top, text="Enter group name to delete:", font=("Arial", 12)).pack()
-
+    ctk.CTkLabel(top, text="Group Name to Delete:", font=("Arial", 16)).pack(pady=(16, 8))
     entry = ctk.CTkEntry(top)
-    entry.pack(padx=16, pady=8, fill="x")
+    entry.pack(padx=16, pady=(0, 12), fill="x")
 
-    if default_name:
-        entry.insert(0, default_name)
+    if preset_group_name:
+        entry.insert(0, preset_group_name)
 
-    def handle_delete():
-        name = entry.get().strip()
-        if not name:
-            messagebox.showerror("Error", "Group name is required.")
-            return
+    btn = ctk.CTkFrame(top, fg_color="transparent")
+    btn.pack(pady=6)
 
-        if not messagebox.askyesno("Confirm Delete", f"Delete group '{name}'?\nThis will unlink it from all students."):
-            return
+    def handle():
+        ok = delete_group_flow(entry.get(), parent=top)
+        if ok:
+            top.destroy()
+            if refresh_all:
+                refresh_all()
 
-        ok = delete_group_by_name(name)
-        if not ok:
-            messagebox.showinfo("Not Found", f"Group '{name}' does not exist.")
-        else:
-            messagebox.showinfo("Deleted", f"Group '{name}' deleted.")
-        refresh_all()
-        top.destroy()
-
-    btn_frame = ctk.CTkFrame(top, fg_color="transparent")
-    btn_frame.pack(pady=8)
-    ctk.CTkButton(btn_frame, text="Delete", command=handle_delete, fg_color="#DC2626").pack(side="left", padx=4)
-    ctk.CTkButton(btn_frame, text="Cancel", command=top.destroy).pack(side="left", padx=4)
-
+    ctk.CTkButton(btn, text="Delete", command=handle, fg_color="#EF4444").pack(side="left", padx=4)
+    ctk.CTkButton(btn, text="Cancel", command=top.destroy).pack(side="left", padx=4)
     return top
+
+def delete_group_flow(group_name: str, parent=None):
+    group_name = (group_name or "").strip()
+    if not group_name:
+        messagebox.showerror("Error", "No group selected.", parent=parent)
+        return False
+
+    if not messagebox.askyesno(
+        "Confirm Delete",
+        f"Delete group '{group_name}'?\n\nThis will remove the group and its links.",
+        parent=parent
+    ):
+        return False
+
+    try:
+        from DB import delete_group_by_name
+        deleted = delete_group_by_name(group_name)
+    except Exception as e:
+        messagebox.showerror("DB Error", str(e), parent=parent)
+        return False
+
+    if not deleted:
+        messagebox.showinfo("Not Found", f"Group '{group_name}' was not found.", parent=parent)
+        return False
+
+    messagebox.showinfo("Deleted", f"Group '{group_name}' deleted.", parent=parent)
+    return True
 
 def open_manage_groups():
     win = ctk.CTkToplevel(ElNajahSchool)
@@ -535,10 +562,13 @@ def open_manage_groups():
     right = ctk.CTkFrame(root, fg_color="white")
     right.pack(side="left", fill="both", expand=True)
 
-    groups_tree = ttk.Treeview(right, columns=("group", "count"), show="headings")
+    groups_tree = ttk.Treeview(right, columns=("id", "group", "count"), show="headings")
+
+    groups_tree.heading("id", text="ID")
     groups_tree.heading("group", text="Group")
     groups_tree.heading("count", text="Students")
 
+    groups_tree.column("id", width=0, stretch=False)  # hidden
     groups_tree.column("group", width=320, anchor="w")
     groups_tree.column("count", width=90, anchor="center")
 
@@ -558,15 +588,30 @@ def open_manage_groups():
             if r.get("group") != "TOTAL"
         }
 
-        for gname in get_all_groups():
-            groups_tree.insert("", "end", values=(gname, counts_map.get(gname, 0)))
+        for gid, gname in _get_groups_with_ids():
+            groups_tree.insert("", "end", values=(gid, gname, counts_map.get(gname, 0)))
 
-    def selected_group_name():
+    def _get_groups_with_ids():
+        import sqlite3
+        from DB import DB_PATH
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT id, name FROM groups ORDER BY name COLLATE NOCASE")
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+
+    def selected_group():
         sel = groups_tree.selection()
         if not sel:
-            return None
+            return None, None
         vals = groups_tree.item(sel[0], "values")
-        return vals[0] if vals else None
+        if not vals:
+            return None, None
+        try:
+            return int(vals[0]), vals[1]
+        except Exception:
+            return None, None
 
     def on_add():
         child = open_add_group(parent=win)
@@ -582,13 +627,17 @@ def open_manage_groups():
         if not name:
             messagebox.showerror("No selection", "Select a group to delete.")
             return
-        child = open_delete_group(default_name=name, parent=win)
-        try:
-            win.wait_window(child)
-        except Exception:
-            pass
-        refresh_groups_tree()
-        refresh_all()
+
+        deleted = open_delete_group(
+            parent=win,
+            preset_group_name=name,
+            skip_popup=True
+        )
+
+        if deleted:
+            refresh_groups_tree()
+            refresh_all()
+
 
     ctk.CTkButton(left, text="Add Group", command=on_add, fg_color=PRIMARY, hover_color=HOVER).pack(
         fill="x", padx=10, pady=(0, 8)

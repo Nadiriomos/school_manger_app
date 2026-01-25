@@ -153,21 +153,28 @@ def _count_sessions(
         cur += timedelta(days=1)
     return count
 
-def _bind_mousewheel(widget):
+def _bind_mousewheel_local(scrollable: ctk.CTkScrollableFrame):
     def _on_mousewheel(event):
-        # Windows / Linux
-        if event.num == 4:      # Linux scroll up
-            widget._parent_canvas.yview_scroll(-1, "units")
-        elif event.num == 5:    # Linux scroll down
-            widget._parent_canvas.yview_scroll(1, "units")
-        else:                   # Windows / Mac
-            widget._parent_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        if event.num == 4:
+            scrollable._parent_canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            scrollable._parent_canvas.yview_scroll(1, "units")
+        else:
+            scrollable._parent_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
-    # Windows / Mac
-    widget.bind_all("<MouseWheel>", _on_mousewheel)
-    # Linux
-    widget.bind_all("<Button-4>", _on_mousewheel)
-    widget.bind_all("<Button-5>", _on_mousewheel)
+    def _bind(_e=None):
+        scrollable.bind_all("<MouseWheel>", _on_mousewheel)
+        scrollable.bind_all("<Button-4>", _on_mousewheel)
+        scrollable.bind_all("<Button-5>", _on_mousewheel)
+
+    def _unbind(_e=None):
+        scrollable.unbind_all("<MouseWheel>")
+        scrollable.unbind_all("<Button-4>")
+        scrollable.unbind_all("<Button-5>")
+
+    scrollable.bind("<Enter>", _bind)
+    scrollable.bind("<Leave>", _unbind)
+
 
 # ----------------------------
 # Public: plugin attach
@@ -198,7 +205,7 @@ def attach_group_schedule_extension(
 
     ctk.CTkLabel(
         header,
-        text="Schedule (optional)",
+        text="Schedule",
         font=("Arial", 16, "bold"),
     ).pack(side="left")
 
@@ -221,7 +228,7 @@ def attach_group_schedule_extension(
         height=400  # controls when scrolling appears
     )
 
-    _bind_mousewheel(card)
+    _bind_mousewheel_local(card)
 
     # --- Date range
     range_frame = ctk.CTkFrame(card, fg_color="transparent")
@@ -446,3 +453,115 @@ def attach_group_schedule_extension(
         return payload
 
     return validate_fn, apply_fn
+
+def save_group_schedule_and_regenerate(group_id: int, payload: dict | None) -> None:
+    """
+    Writes:
+      - group_schedules
+      - group_schedule_days
+      - group_schedule_exclusions
+    Then regenerates:
+      - sessions
+
+    If payload is None => delete schedule + days + exclusions + sessions for that group.
+    """
+    conn = _get_conn()
+    cur = conn.cursor()
+
+    try:
+        # If schedule is not set => wipe existing schedule data
+        if not payload:
+            cur.execute("DELETE FROM group_schedule_days WHERE group_id = ?", (group_id,))
+            cur.execute("DELETE FROM group_schedule_exclusions WHERE group_id = ?", (group_id,))
+            cur.execute("DELETE FROM group_schedules WHERE group_id = ?", (group_id,))
+            cur.execute("DELETE FROM sessions WHERE group_id = ?", (group_id,))
+            conn.commit()
+            return
+
+        start_date = payload["start_date"]  # YYYY-MM-DD
+        end_date = payload["end_date"]      # YYYY-MM-DD
+        days_map = payload["days"]          # {weekday: {"enabled":bool,"start":"HH:MM","end":"HH:MM"}}
+        exclusions = payload.get("exclusions", [])  # ["YYYY-MM-DD", ...]
+
+        # --- Upsert group_schedules
+        cur.execute(
+            """
+            INSERT INTO group_schedules (group_id, start_date, end_date)
+            VALUES (?, ?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET
+                start_date = excluded.start_date,
+                end_date   = excluded.end_date
+            """,
+            (group_id, start_date, end_date),
+        )
+
+        # --- Replace weekday rules
+        cur.execute("DELETE FROM group_schedule_days WHERE group_id = ?", (group_id,))
+        day_rows = []
+        for wday, info in days_map.items():
+            # keys might be strings depending on how dict was created
+            wday_int = int(wday)
+            if info.get("enabled"):
+                day_rows.append((group_id, wday_int, info["start"].strip(), info["end"].strip()))
+
+        if day_rows:
+            cur.executemany(
+                """
+                INSERT INTO group_schedule_days (group_id, weekday, start_time, end_time)
+                VALUES (?, ?, ?, ?)
+                """,
+                day_rows,
+            )
+
+        # --- Replace exclusions (just dates)
+        cur.execute("DELETE FROM group_schedule_exclusions WHERE group_id = ?", (group_id,))
+        ex_rows = [(group_id, d.strip()) for d in exclusions if d.strip()]
+        if ex_rows:
+            cur.executemany(
+                """
+                INSERT INTO group_schedule_exclusions (group_id, date)
+                VALUES (?, ?)
+                """,
+                ex_rows,
+            )
+
+        # --- Regenerate sessions (hard regenerate, as agreed)
+        cur.execute("DELETE FROM sessions WHERE group_id = ?", (group_id,))
+
+        # Build lookup weekday -> (start,end)
+        weekday_time = {int(w): (info["start"].strip(), info["end"].strip())
+                        for w, info in days_map.items() if info.get("enabled")}
+
+        selected_weekdays = set(weekday_time.keys())
+        excluded_set = set(exclusions)
+
+        if selected_weekdays:
+            from datetime import datetime, timedelta
+            sd = datetime.strptime(start_date, "%Y-%m-%d").date()
+            ed = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+            session_rows = []
+            d = sd
+            while d <= ed:
+                ds = d.strftime("%Y-%m-%d")
+                if d.weekday() in selected_weekdays and ds not in excluded_set:
+                    st, et = weekday_time[d.weekday()]
+                    session_rows.append((group_id, ds, st, et))
+                d += timedelta(days=1)
+
+            if session_rows:
+                cur.executemany(
+                    """
+                    INSERT INTO sessions (group_id, date, start_time, end_time)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    session_rows,
+                )
+            
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
