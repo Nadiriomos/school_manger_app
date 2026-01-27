@@ -269,8 +269,8 @@ def attach_group_schedule_extension(
 
     for i, (label, wday) in enumerate(WEEKDAYS, start=1):
         enabled = bool(default_times.get(wday, {}).get("enabled", False))
-        start_t = default_times.get(wday, {}).get("start", "17:00")
-        end_t = default_times.get(wday, {}).get("end", "18:30")
+        start_t = default_times.get(wday, {}).get("start", "18:00")
+        end_t = default_times.get(wday, {}).get("end", "19:30")
 
         ctk.CTkLabel(grid, text=label, width=60, anchor="w").grid(row=i, column=0, sticky="w", pady=2)
 
@@ -563,5 +563,329 @@ def save_group_schedule_and_regenerate(group_id: int, payload: dict | None) -> N
     except Exception:
         conn.rollback()
         raise
+    finally:
+        conn.close()
+
+def _has_running_session(cur: sqlite3.Cursor, group_id: int, now_dt: datetime) -> bool:
+    """Return True if the group has a session running right now."""
+    today = now_dt.date().strftime("%Y-%m-%d")
+    now_t = now_dt.strftime("%H:%M")
+    cur.execute(
+        """
+        SELECT 1
+        FROM sessions
+        WHERE group_id = ?
+          AND date = ?
+          AND start_time <= ?
+          AND end_time  > ?
+        LIMIT 1
+        """,
+        (group_id, today, now_t, now_t),
+    )
+    return cur.fetchone() is not None
+
+
+def _delete_future_sessions(cur: sqlite3.Cursor, group_id: int, now_dt: datetime) -> int:
+    """Delete sessions after the cutoff (future only).
+
+    Cutoff rule:
+      - date > today  => future
+      - date == today AND start_time > now => future
+
+    Returns number of deleted rows.
+    """
+    today = now_dt.date().strftime("%Y-%m-%d")
+    now_t = now_dt.strftime("%H:%M")
+    cur.execute(
+        """
+        DELETE FROM sessions
+        WHERE group_id = ?
+          AND (date > ? OR (date = ? AND start_time > ?))
+        """,
+        (group_id, today, today, now_t),
+    )
+    return cur.rowcount or 0
+
+
+def save_group_schedule_and_regenerate_edit(group_id: int, payload: dict | None) -> None:
+    """Edit-mode save: keep past sessions, regenerate future sessions only.
+
+    - Updates schedule tables
+    - Blocks if a session is running now
+    - Deletes future sessions and regenerates only future ones
+
+    If payload is None:
+      - delete schedule tables for this group
+      - delete future sessions only
+      - keep past sessions
+    """
+    conn = _get_conn()
+    cur = conn.cursor()
+    now_dt = datetime.now()
+
+    try:
+        if _has_running_session(cur, group_id, now_dt):
+            raise RuntimeError(
+                "This group has a session running right now. "
+                "Please wait until it ends before editing the group."
+            )
+
+        if not payload:
+            cur.execute("DELETE FROM group_schedule_days WHERE group_id = ?", (group_id,))
+            cur.execute("DELETE FROM group_schedule_exclusions WHERE group_id = ?", (group_id,))
+            cur.execute("DELETE FROM group_schedules WHERE group_id = ?", (group_id,))
+            _delete_future_sessions(cur, group_id, now_dt)
+            conn.commit()
+            return
+
+        start_date = payload["start_date"]
+        end_date = payload["end_date"]
+        days_map = payload["days"]
+        exclusions = payload.get("exclusions", [])
+
+        cur.execute(
+            """
+            INSERT INTO group_schedules (group_id, start_date, end_date)
+            VALUES (?, ?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET
+                start_date = excluded.start_date,
+                end_date   = excluded.end_date
+            """,
+            (group_id, start_date, end_date),
+        )
+
+        cur.execute("DELETE FROM group_schedule_days WHERE group_id = ?", (group_id,))
+        day_rows = []
+        for wday, info in days_map.items():
+            wday_int = int(wday)
+            if info.get("enabled"):
+                day_rows.append((group_id, wday_int, info["start"].strip(), info["end"].strip()))
+        if day_rows:
+            cur.executemany(
+                """
+                INSERT INTO group_schedule_days (group_id, weekday, start_time, end_time)
+                VALUES (?, ?, ?, ?)
+                """,
+                day_rows,
+            )
+
+        cur.execute("DELETE FROM group_schedule_exclusions WHERE group_id = ?", (group_id,))
+        ex_rows = [(group_id, d.strip()) for d in exclusions if d.strip()]
+        if ex_rows:
+            cur.executemany(
+                """
+                INSERT INTO group_schedule_exclusions (group_id, date)
+                VALUES (?, ?)
+                """,
+                ex_rows,
+            )
+
+        # Future-only regenerate
+        _delete_future_sessions(cur, group_id, now_dt)
+
+        weekday_time = {
+            int(w): (info["start"].strip(), info["end"].strip())
+            for w, info in days_map.items()
+            if info.get("enabled")
+        }
+        selected_weekdays = set(weekday_time.keys())
+        excluded_set = set(exclusions)
+
+        if selected_weekdays:
+            sd = datetime.strptime(start_date, "%Y-%m-%d").date()
+            ed = datetime.strptime(end_date, "%Y-%m-%d").date()
+            today = now_dt.date()
+            now_t = now_dt.strftime("%H:%M")
+
+            session_rows = []
+            d = sd
+            while d <= ed:
+                ds = d.strftime("%Y-%m-%d")
+                if d.weekday() in selected_weekdays and ds not in excluded_set:
+                    st, et = weekday_time[d.weekday()]
+                    if d > today or (d == today and st > now_t):
+                        session_rows.append((group_id, ds, st, et))
+                d += timedelta(days=1)
+
+            if session_rows:
+                cur.executemany(
+                    """
+                    INSERT INTO sessions (group_id, date, start_time, end_time)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    session_rows,
+                )
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+# ---------------------------------------------------------------------------
+# Sessions + Attendance review helpers (View Sessions UI)
+# ---------------------------------------------------------------------------
+
+def _validate_session_inputs(date_s: str, start_s: str, end_s: str) -> tuple[str, str, str]:
+    d = _parse_date(date_s).strftime("%Y-%m-%d")
+
+    sh, sm = _parse_time_hhmm(start_s)
+    eh, em = _parse_time_hhmm(end_s)
+
+    start_s = f"{sh:02d}:{sm:02d}"
+    end_s = f"{eh:02d}:{em:02d}"
+
+    if (eh * 60 + em) <= (sh * 60 + sm):
+        raise ValueError("End time must be after start time.")
+
+    return d, start_s, end_s
+
+
+def get_group_sessions(group_id: int) -> list[dict]:
+    """Return sessions for group ordered by date, start_time."""
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT id, date, start_time, end_time
+            FROM sessions
+            WHERE group_id = ?
+            ORDER BY date ASC, start_time ASC
+            """,
+            (group_id,),
+        )
+        return [
+            {"id": r[0], "date": r[1], "start_time": r[2], "end_time": r[3]}
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def get_attendance_counts_for_sessions(session_ids: list[int]) -> dict[int, int]:
+    """Batch: returns {session_id: present_count} only for sessions that have any attendance rows."""
+    if not session_ids:
+        return {}
+
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        placeholders = ",".join("?" for _ in session_ids)
+        cur.execute(
+            f"""
+            SELECT session_id, COUNT(*)
+            FROM attendance
+            WHERE session_id IN ({placeholders})
+            GROUP BY session_id
+            """,
+            session_ids,
+        )
+        return {int(sid): int(cnt) for (sid, cnt) in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def _get_group_students_by_id(group_id: int) -> list[dict]:
+    """Returns current group students: [{'id':..,'name':..}, ...]"""
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT s.id, s.name
+            FROM student_group sg
+            JOIN students s ON s.id = sg.student_id
+            WHERE sg.group_id = ?
+            ORDER BY s.name COLLATE NOCASE
+            """,
+            (group_id,),
+        )
+        return [{"id": int(r[0]), "name": str(r[1])} for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_session_review_lists(session_id: int, group_id: int) -> dict:
+    """
+    Review-only lists:
+      present = students with a row in attendance(session_id, student_id)
+      absent  = group students not present
+    """
+    students = _get_group_students_by_id(group_id)
+    all_ids = [s["id"] for s in students]
+
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT student_id FROM attendance WHERE session_id = ?", (session_id,))
+        present_ids = {int(r[0]) for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+    present = [s for s in students if s["id"] in present_ids]
+    absent = [s for s in students if s["id"] not in present_ids]
+
+    return {
+        "taken": len(present_ids) > 0,
+        "total": len(all_ids),
+        "present": present,
+        "absent": absent,
+    }
+
+
+def add_session(group_id: int, date_s: str, start_s: str, end_s: str) -> int:
+    d, st, et = _validate_session_inputs(date_s, start_s, end_s)
+
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO sessions (group_id, date, start_time, end_time)
+            VALUES (?, ?, ?, ?)
+            """,
+            (group_id, d, st, et),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        raise ValueError("A session with the same date/time already exists for this group.") from e
+    finally:
+        conn.close()
+
+
+def update_session(session_id: int, date_s: str, start_s: str, end_s: str) -> None:
+    d, st, et = _validate_session_inputs(date_s, start_s, end_s)
+
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            UPDATE sessions
+            SET date = ?, start_time = ?, end_time = ?
+            WHERE id = ?
+            """,
+            (d, st, et, session_id),
+        )
+        if cur.rowcount == 0:
+            raise ValueError("Session not found.")
+        conn.commit()
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        raise ValueError("That edit would create a duplicate session (same date/time).") from e
+    finally:
+        conn.close()
+
+
+def delete_session(session_id: int) -> None:
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        conn.commit()
     finally:
         conn.close()

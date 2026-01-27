@@ -994,3 +994,100 @@ def get_student_counts_by_group() -> list[dict]:
         return rows
     finally:
         conn.close()
+
+def get_group_by_id(group_id: int) -> Group:
+    """Fetch a group by ID. Raises NotFoundError if it doesn't exist."""
+    conn = _get_conn(row_factory=True)
+    c = conn.cursor()
+    try:
+        c.execute("SELECT id, name FROM groups WHERE id = ?", (group_id,))
+        row = c.fetchone()
+        if not row:
+            raise NotFoundError(f"Group {group_id} not found.")
+        return Group(id=int(row["id"]), name=str(row["name"]))
+    finally:
+        conn.close()
+
+
+def update_group_name(group_id: int, new_name: str) -> None:
+    """Rename a group (keeps same group_id).
+
+    Raises:
+        NotFoundError: if group_id doesn't exist
+        AlreadyExistsError: if new_name is taken
+    """
+    new_name = (new_name or "").strip()
+    if not new_name:
+        raise DBError("Group name cannot be empty.")
+
+    conn = _get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("UPDATE groups SET name = ? WHERE id = ?", (new_name, group_id))
+        if c.rowcount == 0:
+            raise NotFoundError(f"Group {group_id} not found.")
+        conn.commit()
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        raise AlreadyExistsError(f"Group '{new_name}' already exists.") from e
+    finally:
+        conn.close()
+
+
+def get_group_schedule_payload(group_id: int) -> Optional[dict]:
+    """Return schedule payload for schedule.attach_group_schedule_extension().
+
+    Shape:
+        {
+          "start_date": "YYYY-MM-DD",
+          "end_date":   "YYYY-MM-DD",
+          "days": { weekday_int: {"enabled": True, "start": "HH:MM", "end": "HH:MM"}, ... },
+          "exclusions": ["YYYY-MM-DD", ...]
+        }
+
+    Returns None if the group has no schedule.
+    """
+    conn = _get_conn(row_factory=True)
+    c = conn.cursor()
+    try:
+        try:
+            c.execute(
+                "SELECT start_date, end_date FROM group_schedules WHERE group_id = ?",
+                (group_id,),
+            )
+        except sqlite3.OperationalError:
+            # schedule tables not created yet
+            return None
+
+        sched = c.fetchone()
+        if not sched:
+            return None
+
+        payload = {
+            "start_date": sched["start_date"],
+            "end_date": sched["end_date"],
+            "days": {},
+            "exclusions": [],
+        }
+
+        c.execute(
+            "SELECT weekday, start_time, end_time FROM group_schedule_days WHERE group_id = ?",
+            (group_id,),
+        )
+        for r in c.fetchall():
+            w = int(r["weekday"])
+            payload["days"][w] = {
+                "enabled": True,
+                "start": r["start_time"],
+                "end": r["end_time"],
+            }
+
+        c.execute(
+            "SELECT date FROM group_schedule_exclusions WHERE group_id = ? ORDER BY date",
+            (group_id,),
+        )
+        payload["exclusions"] = [row["date"] for row in c.fetchall()]
+
+        return payload
+    finally:
+        conn.close()

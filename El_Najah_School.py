@@ -42,6 +42,18 @@ def resource_path(relative_path: str) -> str:
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
+def safe_grab(win: tk.Toplevel):
+    """Grab a toplevel safely (some WMs error if not yet viewable)."""
+    try:
+        win.deiconify()
+        win.lift()
+        win.update_idletasks()
+        win.after(0, win.grab_set)
+    except tk.TclError:
+        try:
+            win.focus_force()
+        except Exception:
+            pass
 
 # ---------------------------------------------------------------------------
 # Global style / constants
@@ -475,6 +487,407 @@ def open_add_group(parent=None):
 
     return top
 
+def open_edit_group(group_id: int, parent=None):
+    top = ctk.CTkToplevel(parent or ElNajahSchool)
+    top.title("Edit Group")
+    top.geometry("565x620")
+
+    try:
+        top.grab_set()
+    except tk.TclError:
+        top.focus_force()
+    top.focus_force()
+
+    # Load current group + schedule
+    try:
+        from DB import get_group_by_id, get_group_schedule_payload
+        group_obj = get_group_by_id(group_id)
+        initial_schedule = get_group_schedule_payload(group_id)
+    except Exception as e:
+        messagebox.showerror("DB Error", f"Could not load group:\n{e}")
+        top.destroy()
+        return None
+
+    container = ctk.CTkFrame(top, fg_color="transparent")
+    container.pack(fill="both", expand=True, padx=16, pady=16)
+
+    ctk.CTkLabel(container, text="Edit Group Name:", font=("Arial", 16)).pack(anchor="w", pady=(0, 8))
+    entry = ctk.CTkEntry(container)
+    entry.pack(fill="x", pady=(0, 12))
+    entry.insert(0, group_obj.name)
+
+    ext_zone = ctk.CTkFrame(container, fg_color="transparent")
+    ext_zone.pack(fill="x", pady=(8, 12))
+
+    schedule_validate, schedule_apply = schedule.attach_group_schedule_extension(
+        ext_zone,
+        initial_data=initial_schedule or {},
+    )
+
+    btn_frame = ctk.CTkFrame(container, fg_color="transparent")
+    btn_frame.pack(fill="x", pady=(8, 0))
+
+    def handle_save():
+        from DB import update_group_name
+
+        new_name = entry.get().strip()
+        if not new_name:
+            messagebox.showerror("Error", "Group name cannot be empty.")
+            return
+
+        if schedule_validate and not schedule_validate():
+            return
+
+        schedule_payload = schedule_apply() if schedule_apply else None
+
+        try:
+            update_group_name(group_id, new_name)
+        except AlreadyExistsError as e:
+            messagebox.showerror("Duplicate Name", str(e))
+            return
+        except Exception as e:
+            messagebox.showerror("DB Error", str(e))
+            return
+
+        try:
+            schedule.save_group_schedule_and_regenerate_edit(group_id, schedule_payload)
+        except Exception as e:
+            messagebox.showerror("Schedule Error", f"Schedule update failed:\n{e}")
+            return
+
+        messagebox.showinfo("Edited", f"Group '{new_name}' updated.")
+        top.destroy()
+        refresh_all()
+
+    ctk.CTkButton(btn_frame, text="Save", command=handle_save, fg_color=PRIMARY, hover_color=HOVER).pack(side="left", padx=4)
+    ctk.CTkButton(btn_frame, text="Cancel", command=top.destroy).pack(side="left", padx=4)
+
+    return top
+
+def open_view_sessions(group_id: int, parent=None):
+    from DB import get_group_by_id
+    import schedule
+    from datetime import datetime
+
+    g = get_group_by_id(group_id)
+    top = ctk.CTkToplevel(parent or ElNajahSchool)
+    top.title(f"Sessions — {g.name}")
+    top.geometry("860x640")
+
+    try:
+        top.grab_set()
+    except tk.TclError:
+        top.focus_force()
+    top.focus_force()
+
+    # ---------------- Top bar ----------------
+    header = ctk.CTkFrame(top, fg_color="transparent")
+    header.pack(fill="x", padx=16, pady=(14, 6))
+
+    title = ctk.CTkLabel(header, text=f"Sessions — {g.name}", font=("Arial", 18, "bold"))
+    title.pack(side="left")
+
+    # Filters
+    filter_frame = ctk.CTkFrame(top, fg_color="transparent")
+    filter_frame.pack(fill="x", padx=16, pady=(0, 8))
+
+    mode_var = ctk.StringVar(value="All")          # All / Past / Upcoming
+    month_var = ctk.StringVar(value="Current")     # All / Prev / Current / Next
+
+    ctk.CTkLabel(filter_frame, text="Filter:", font=("Arial", 12)).pack(side="left", padx=(0, 6))
+    ctk.CTkOptionMenu(filter_frame, variable=mode_var, values=["All", "Past", "Upcoming"], width=130).pack(side="left", padx=(0, 10))
+
+    ctk.CTkLabel(filter_frame, text="Month:", font=("Arial", 12)).pack(side="left", padx=(0, 6))
+    ctk.CTkOptionMenu(filter_frame, variable=month_var, values=["All", "Prev", "Current", "Next"], width=130).pack(side="left", padx=(0, 10))
+
+    stats_lbl = ctk.CTkLabel(filter_frame, text="", font=("Arial", 12))
+    stats_lbl.pack(side="left", padx=8)
+
+    ctk.CTkButton(filter_frame, text="＋ Add Session", fg_color=PRIMARY, hover_color=HOVER,
+                 command=lambda: _open_add_session_modal()).pack(side="right")
+
+    # ---------------- Scroll area ----------------
+    scroll = ctk.CTkScrollableFrame(top, fg_color="white")
+    scroll.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+    # -------- helpers --------
+    def _session_status(sess):
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        nt = now.strftime("%H:%M")
+
+        d = sess["date"]
+        st = sess["start_time"]
+        et = sess["end_time"]
+
+        if d < today:
+            return "past"
+        if d > today:
+            return "upcoming"
+        # today
+        if st <= nt < et:
+            return "running"
+        if et <= nt:
+            return "past"
+        return "upcoming"
+
+    def _month_scope_ok(sess):
+        if month_var.get() == "All":
+            return True
+
+        now = datetime.now()
+        y, m = now.year, now.month
+
+        def ym(s):
+            yy = int(s["date"][:4]); mm = int(s["date"][5:7])
+            return yy, mm
+
+        sy, sm = ym(sess)
+
+        if month_var.get() == "Current":
+            return (sy, sm) == (y, m)
+        if month_var.get() == "Prev":
+            py, pm = (y - 1, 12) if m == 1 else (y, m - 1)
+            return (sy, sm) == (py, pm)
+        if month_var.get() == "Next":
+            ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
+            return (sy, sm) == (ny, nm)
+        return True
+
+    def _open_review(session_id: int, sess: dict):
+        # Only past sessions are reviewable per your rule
+        if _session_status(sess) != "past":
+            messagebox.showinfo("Not Available", "You can review presence/absence only for past sessions.")
+            return
+
+        data = schedule.get_session_review_lists(session_id, group_id)
+
+        win = ctk.CTkToplevel(top)
+        win.title(f"Review — {sess['date']} {sess['start_time']}–{sess['end_time']}")
+        win.geometry("900x560")
+        safe_grab(win)
+        win.focus_force()
+
+        topbar = ctk.CTkFrame(win, fg_color="transparent")
+        topbar.pack(fill="x", padx=16, pady=(12, 8))
+
+        ctk.CTkLabel(
+            topbar,
+            text=f"{sess['date']}  {sess['start_time']}–{sess['end_time']}   |   Total: {data['total']}  Present: {len(data['present'])}  Absent: {len(data['absent'])}",
+            font=("Arial", 14, "bold")
+        ).pack(side="left")
+
+        body = ctk.CTkFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(body, text="Present", font=("Arial", 14, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ctk.CTkLabel(body, text="Absent", font=("Arial", 14, "bold")).grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+        left = ctk.CTkScrollableFrame(body, fg_color="white")
+        right = ctk.CTkScrollableFrame(body, fg_color="white")
+        left.grid(row=1, column=0, sticky="nsew", padx=(0, 8), pady=(8, 0))
+        right.grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=(8, 0))
+
+        for s in data["present"]:
+            ctk.CTkLabel(left, text=f"{s['id']} · {s['name']}", anchor="w").pack(fill="x", padx=10, pady=3)
+
+        for s in data["absent"]:
+            ctk.CTkLabel(right, text=f"{s['id']} · {s['name']}", anchor="w").pack(fill="x", padx=10, pady=3)
+
+    def _open_edit_session_modal(sess: dict):
+        win = ctk.CTkToplevel(top)
+        win.title("Edit Session")
+        win.geometry("420x260")
+        safe_grab(win)
+        win.focus_force()
+
+        frm = ctk.CTkFrame(win, fg_color="transparent")
+        frm.pack(fill="both", expand=True, padx=16, pady=16)
+
+        ctk.CTkLabel(frm, text="Date (YYYY-MM-DD):").pack(anchor="w")
+        d_ent = ctk.CTkEntry(frm); d_ent.pack(fill="x", pady=(0, 10)); d_ent.insert(0, sess["date"])
+
+        ctk.CTkLabel(frm, text="Start (HH:MM):").pack(anchor="w")
+        s_ent = ctk.CTkEntry(frm); s_ent.pack(fill="x", pady=(0, 10)); s_ent.insert(0, sess["start_time"])
+
+        ctk.CTkLabel(frm, text="End (HH:MM):").pack(anchor="w")
+        e_ent = ctk.CTkEntry(frm); e_ent.pack(fill="x", pady=(0, 14)); e_ent.insert(0, sess["end_time"])
+
+        def save():
+            try:
+                schedule.update_session(sess["id"], d_ent.get(), s_ent.get(), e_ent.get())
+            except Exception as e:
+                messagebox.showerror("Edit Error", str(e))
+                return
+            win.destroy()
+            refresh()
+
+        btns = ctk.CTkFrame(frm, fg_color="transparent"); btns.pack(fill="x")
+        ctk.CTkButton(btns, text="Save", fg_color=PRIMARY, hover_color=HOVER, command=save).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btns, text="Cancel", command=win.destroy).pack(side="left")
+
+    def _open_add_session_modal():
+        win = ctk.CTkToplevel(top)
+        win.title("Add Session")
+        win.geometry("420x260")
+        safe_grab(win)
+        win.focus_force()
+
+        frm = ctk.CTkFrame(win, fg_color="transparent")
+        frm.pack(fill="both", expand=True, padx=16, pady=16)
+
+        ctk.CTkLabel(frm, text="Date (YYYY-MM-DD):").pack(anchor="w")
+        d_ent = ctk.CTkEntry(frm); d_ent.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(frm, text="Start (HH:MM):").pack(anchor="w")
+        s_ent = ctk.CTkEntry(frm); s_ent.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(frm, text="End (HH:MM):").pack(anchor="w")
+        e_ent = ctk.CTkEntry(frm); e_ent.pack(fill="x", pady=(0, 14))
+
+        def add():
+            try:
+                schedule.add_session(group_id, d_ent.get(), s_ent.get(), e_ent.get())
+            except Exception as e:
+                messagebox.showerror("Add Error", str(e))
+                return
+            win.destroy()
+            refresh()
+
+        btns = ctk.CTkFrame(frm, fg_color="transparent"); btns.pack(fill="x")
+        ctk.CTkButton(btns, text="Add", fg_color=PRIMARY, hover_color=HOVER, command=add).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btns, text="Cancel", command=win.destroy).pack(side="left")
+
+    def _delete_session(sess: dict):
+        if not messagebox.askyesno("Confirm Delete", f"Delete session on {sess['date']} {sess['start_time']}–{sess['end_time']}?"):
+            return
+        try:
+            schedule.delete_session(sess["id"])
+        except Exception as e:
+            messagebox.showerror("Delete Error", str(e))
+            return
+        refresh()
+
+    def refresh():
+        for w in scroll.winfo_children():
+            w.destroy()
+
+        sessions = schedule.get_group_sessions(group_id)
+        sid_list = [s["id"] for s in sessions]
+        present_counts = schedule.get_attendance_counts_for_sessions(sid_list)
+        total_students = len(schedule._get_group_students_by_id(group_id))  # uses the helper we added
+
+        # Apply filters
+        filt = mode_var.get()
+        sessions2 = []
+        for s in sessions:
+            st = _session_status(s)
+            if filt == "Past" and st != "past":
+                continue
+            if filt == "Upcoming" and st not in ("upcoming", "running"):
+                continue
+            if not _month_scope_ok(s):
+                continue
+            sessions2.append(s)
+
+        # Stats
+        past_n = sum(1 for s in sessions if _session_status(s) == "past")
+        up_n = sum(1 for s in sessions if _session_status(s) in ("upcoming", "running"))
+        stats_lbl.configure(text=f"Total: {len(sessions)} | Past: {past_n} | Upcoming: {up_n}")
+
+        # Render grouped by month
+        last_month = None
+        for s in sessions2:
+            ym = s["date"][:7]  # YYYY-MM
+            if ym != last_month:
+                last_month = ym
+                # Month header + gray line
+                mh = ctk.CTkFrame(scroll, fg_color="transparent")
+                mh.pack(fill="x", padx=8, pady=(14, 6))
+
+                ctk.CTkLabel(mh, text=ym, font=("Arial", 14, "bold")).pack(side="left")
+                line = ctk.CTkFrame(scroll, height=2, fg_color="#E5E7EB")
+                line.pack(fill="x", padx=8, pady=(0, 10))
+
+            st = _session_status(s)
+
+            # Color logic
+            bg = "#FFFFFF"
+            if st == "upcoming":
+                bg = "#DCFCE7"   # green
+            elif st == "running":
+                bg = "#FEF3C7"   # amber
+            else:
+                # past: if attendance taken, color green/red by absences; else gray
+                p = present_counts.get(s["id"], 0)
+                if p > 0:
+                    absent = max(0, total_students - p)
+                    bg = "#DCFCE7" if absent == 0 else "#FEE2E2"
+                else:
+                    bg = "#F3F4F6"
+
+            card = ctk.CTkFrame(scroll, fg_color=bg, corner_radius=12)
+            card.pack(fill="x", padx=8, pady=6)
+
+            row = ctk.CTkFrame(card, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=10)
+
+            # Click area (LEFT) => review. Buttons on RIGHT won't collide.
+            left = ctk.CTkFrame(row, fg_color="transparent")
+            left.pack(side="left", fill="x", expand=True)
+
+            # Weekday text
+            try:
+                from datetime import datetime as _dt
+                wd = _dt.strptime(s["date"], "%Y-%m-%d").strftime("%A")
+            except Exception:
+                wd = ""
+
+            date_lbl = ctk.CTkLabel(left, text=f"{s['date']}  ({wd})", font=("Arial", 13, "bold"))
+            time_lbl = ctk.CTkLabel(left, text=f"{s['start_time']} → {s['end_time']}", font=("Arial", 12))
+            date_lbl.pack(anchor="w")
+            time_lbl.pack(anchor="w")
+
+            # Attendance line (past only + only if taken)
+            if st == "past":
+                p = present_counts.get(s["id"], 0)
+                if p > 0:
+                    absent = max(0, total_students - p)
+                    ctk.CTkLabel(left, text=f"Present: {p}   |   Absent: {absent}", font=("Arial", 12)).pack(anchor="w")
+
+            def _bind_click(w):
+                w.bind("<Button-1>", lambda _e, sid=s["id"], ss=s: _open_review(sid, ss))
+                w.bind("<Double-1>", lambda _e, sid=s["id"], ss=s: _open_review(sid, ss))
+
+            _bind_click(left); _bind_click(date_lbl); _bind_click(time_lbl)
+
+            # Buttons (RIGHT): View / Edit / Delete — do NOT collide with left click
+            right = ctk.CTkFrame(row, fg_color="transparent")
+            right.pack(side="right")
+
+            if st == "past":
+                ctk.CTkButton(right, text="👁", width=38, command=lambda sid=s["id"], ss=s: _open_review(sid, ss)).pack(side="left", padx=3)
+
+            ctk.CTkButton(right, text="✎", width=38, command=lambda ss=s: _open_edit_session_modal(ss)).pack(side="left", padx=3)
+            ctk.CTkButton(right, text="✕", width=38, fg_color="#EF4444", hover_color="#B91C1C",
+                         command=lambda ss=s: _delete_session(ss)).pack(side="left", padx=3)
+
+    # refresh when filters change
+    def _on_filter(_=None):
+        refresh()
+
+    # CTkOptionMenu supports command=...
+    # So we rebuild them with command hooks:
+    # (Simplest trick: configure command after creation)
+    for child in filter_frame.winfo_children():
+        if isinstance(child, ctk.CTkOptionMenu):
+            child.configure(command=_on_filter)
+
+    refresh()
+
 def open_delete_group(parent=None, preset_group_name: str | None = None, skip_popup: bool = False):
     # If caller already has the group name, skip the entry popup entirely.
     if skip_popup and preset_group_name:
@@ -622,6 +1035,31 @@ def open_manage_groups():
         refresh_groups_tree()
         refresh_all()
 
+    def selected_group_name():
+        _gid, _name = selected_group()
+        return _name
+
+    def on_edit():
+        gid, _name = selected_group()
+        if not gid:
+            messagebox.showerror("No selection", "Select a group to edit.")
+            return
+
+        child = open_edit_group(gid, parent=win)
+        try:
+            win.wait_window(child)
+        except Exception:
+            pass
+        refresh_groups_tree()
+        refresh_all()
+
+    def on_view_sessions():
+        gid, _name = selected_group()
+        if not gid:
+            messagebox.showerror("No selection", "Select a group first.")
+            return
+        open_view_sessions(gid, parent=win)
+
     def on_delete():
         name = selected_group_name()
         if not name:
@@ -640,6 +1078,12 @@ def open_manage_groups():
 
 
     ctk.CTkButton(left, text="Add Group", command=on_add, fg_color=PRIMARY, hover_color=HOVER).pack(
+        fill="x", padx=10, pady=(0, 8)
+    )
+    ctk.CTkButton(left, text="Edit Group", command=on_edit, fg_color="green", hover_color=HOVER).pack(
+        fill="x", padx=10, pady=(0, 8)
+    )
+    ctk.CTkButton(left, text="View Sessions", command=on_view_sessions, fg_color="green", hover_color=HOVER).pack(
         fill="x", padx=10, pady=(0, 8)
     )
     ctk.CTkButton(left, text="Delete Group", command=on_delete, fg_color="#DC2626", hover_color="#B91C1C").pack(
