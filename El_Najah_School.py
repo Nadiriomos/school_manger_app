@@ -591,8 +591,8 @@ def open_view_sessions(group_id: int, parent=None):
     filter_frame = ctk.CTkFrame(top, fg_color="transparent")
     filter_frame.pack(fill="x", padx=16, pady=(0, 8))
 
-    mode_var = ctk.StringVar(value="All")          # All / Past / Upcoming
-    month_var = ctk.StringVar(value="Current")     # All / Prev / Current / Next
+    mode_var = ctk.StringVar(value="All")          
+    month_var = ctk.StringVar(value="All")
 
     ctk.CTkLabel(filter_frame, text="Filter:", font=("Arial", 12)).pack(side="left", padx=(0, 6))
     ctk.CTkOptionMenu(filter_frame, variable=mode_var, values=["All", "Past", "Upcoming"], width=130).pack(side="left", padx=(0, 10))
@@ -606,9 +606,72 @@ def open_view_sessions(group_id: int, parent=None):
     ctk.CTkButton(filter_frame, text="＋ Add Session", fg_color=PRIMARY, hover_color=HOVER,
                  command=lambda: _open_add_session_modal()).pack(side="right")
 
+    # --- Loading overlay (centered)
+    loading = {"frame": None, "bar": None}
+
+    def start_loading(text="Loading sessions..."):
+        if loading["frame"] is not None:
+            return
+        lf = ctk.CTkFrame(top, fg_color="white", corner_radius=12)
+        lf.place(relx=0.5, rely=0.5, anchor="center")
+        ctk.CTkLabel(lf, text=text, font=("Arial", 14, "bold")).pack(padx=18, pady=(14, 8))
+        bar = ctk.CTkProgressBar(lf, mode="indeterminate", width=260)
+        bar.pack(padx=18, pady=(0, 14))
+        bar.start()
+        loading["frame"] = lf
+        loading["bar"] = bar
+        top.update_idletasks()
+
+    def stop_loading():
+        if loading["bar"] is not None:
+            try:
+                loading["bar"].stop()
+            except Exception:
+                pass
+        if loading["frame"] is not None:
+            try:
+                loading["frame"].destroy()
+            except Exception:
+                pass
+        loading["frame"] = None
+        loading["bar"] = None
+
     # ---------------- Scroll area ----------------
     scroll = ctk.CTkScrollableFrame(top, fg_color="white")
     scroll.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+    # ---- scrolling (wheel + scrollregion) ----
+    _canvas = getattr(scroll, "_parent_canvas", None) or getattr(scroll, "_canvas", None)
+
+    def _on_wheel(event):
+        if _canvas is None:
+            return
+
+        # Linux wheel
+        if getattr(event, "num", None) == 4:
+            _canvas.yview_scroll(-1, "units")
+            return
+        if getattr(event, "num", None) == 5:
+            _canvas.yview_scroll(1, "units")
+            return
+
+        # Windows/macOS wheel
+        delta = getattr(event, "delta", 0)
+        if delta:
+            _canvas.yview_scroll(int(-1 * (delta / 120)), "units")
+
+    def _bind_wheel(_e=None):
+        top.bind_all("<MouseWheel>", _on_wheel)
+        top.bind_all("<Button-4>", _on_wheel)
+        top.bind_all("<Button-5>", _on_wheel)
+
+    def _unbind_wheel(_e=None):
+        top.unbind_all("<MouseWheel>")
+        top.unbind_all("<Button-4>")
+        top.unbind_all("<Button-5>")
+
+    # Activate wheel only when mouse is over the sessions area
+    scroll.bind("<Enter>", _bind_wheel)
+    scroll.bind("<Leave>", _unbind_wheel)
 
     # -------- helpers --------
     def _session_status(sess):
@@ -771,111 +834,148 @@ def open_view_sessions(group_id: int, parent=None):
             return
         refresh()
 
+    last_month_state = {"val": None} 
+
+    def render_one(s, present_counts, total_students):
+        # Month header + gray line
+        ym = s["date"][:7]  # YYYY-MM
+        if ym != last_month_state["val"]:
+            last_month_state["val"] = ym
+
+            mh = ctk.CTkFrame(scroll, fg_color="transparent")
+            mh.pack(fill="x", padx=8, pady=(14, 6))
+
+            ctk.CTkLabel(mh, text=ym, font=("Arial", 14, "bold")).pack(side="left")
+            line = ctk.CTkFrame(scroll, height=2, fg_color="#E5E7EB")
+            line.pack(fill="x", padx=8, pady=(0, 10))
+
+        st = _session_status(s)
+
+        # Color logic
+        bg = "#FFFFFF"
+        if st == "upcoming":
+            bg = "#DCFCE7"   # green
+        elif st == "running":
+            bg = SECONDARY   # amber
+        else:
+            # past: if attendance taken, color green/red by absences; else gray
+            p = present_counts.get(s["id"], 0)
+            if p > 0:
+                absent = max(0, total_students - p)
+                bg = "#DCFCE7" if absent == 0 else "#FEE2E2"
+            else:
+                bg = "#F3F4F6"
+
+        card = ctk.CTkFrame(scroll, fg_color=bg, corner_radius=12)
+        card.pack(fill="x", padx=8, pady=6)
+
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=10, pady=10)
+
+        # Click area (LEFT) => review. Buttons on RIGHT won't collide.
+        left = ctk.CTkFrame(row, fg_color="transparent")
+        left.pack(side="left", fill="x", expand=True)
+
+        # Weekday text
+        try:
+            wd = datetime.strptime(s["date"], "%Y-%m-%d").strftime("%A")
+        except Exception:
+            wd = ""
+
+        date_lbl = ctk.CTkLabel(left, text=f"{s['date']}  ({wd})", font=("Arial", 13, "bold"))
+        time_lbl = ctk.CTkLabel(left, text=f"{s['start_time']} → {s['end_time']}", font=("Arial", 12))
+        date_lbl.pack(anchor="w")
+        time_lbl.pack(anchor="w")
+
+        # Attendance line (past only + only if taken)
+        if st == "past":
+            p = present_counts.get(s["id"], 0)
+            if p > 0:
+                absent = max(0, total_students - p)
+                ctk.CTkLabel(left, text=f"Present: {p}   |   Absent: {absent}", font=("Arial", 12)).pack(anchor="w")
+
+        def _bind_click(w):
+            w.bind("<Button-1>", lambda _e, sid=s["id"], ss=s: _open_review(sid, ss))
+            w.bind("<Double-1>", lambda _e, sid=s["id"], ss=s: _open_review(sid, ss))
+
+        _bind_click(left); _bind_click(date_lbl); _bind_click(time_lbl)
+
+        # Buttons (RIGHT): View / Edit / Delete
+        right = ctk.CTkFrame(row, fg_color="transparent")
+        right.pack(side="right")
+
+        if st == "past":
+            ctk.CTkButton(right, text="👁", width=38, command=lambda sid=s["id"], ss=s: _open_review(sid, ss)).pack(side="left", padx=3)
+
+        ctk.CTkButton(right, text="✎", width=38, command=lambda ss=s: _open_edit_session_modal(ss)).pack(side="left", padx=3)
+        ctk.CTkButton(right, text="✕", width=38, fg_color="#EF4444", hover_color="#B91C1C",
+                    command=lambda ss=s: _delete_session(ss)).pack(side="left", padx=3)
+
+
     def refresh():
+        start_loading()
+
+        # Clear existing UI immediately so user sees something happen
         for w in scroll.winfo_children():
             w.destroy()
+        top.update_idletasks()
+        last_month_state["val"] = None
 
-        sessions = schedule.get_group_sessions(group_id)
-        sid_list = [s["id"] for s in sessions]
-        present_counts = schedule.get_attendance_counts_for_sessions(sid_list)
-        total_students = len(schedule._get_group_students_by_id(group_id))  # uses the helper we added
+        # Do heavy work in next event loop tick (so loader can appear)
+        top.after(10, _refresh_work)
 
-        # Apply filters
-        filt = mode_var.get()
-        sessions2 = []
-        for s in sessions:
-            st = _session_status(s)
-            if filt == "Past" and st != "past":
-                continue
-            if filt == "Upcoming" and st not in ("upcoming", "running"):
-                continue
-            if not _month_scope_ok(s):
-                continue
-            sessions2.append(s)
+    def _refresh_work():
+        try:
+            sessions = schedule.get_group_sessions(group_id)
+            sid_list = [s["id"] for s in sessions]
+            present_counts = schedule.get_attendance_counts_for_sessions(sid_list)
+            total_students = len(schedule._get_group_students_by_id(group_id))
 
-        # Stats
-        past_n = sum(1 for s in sessions if _session_status(s) == "past")
-        up_n = sum(1 for s in sessions if _session_status(s) in ("upcoming", "running"))
-        stats_lbl.configure(text=f"Total: {len(sessions)} | Past: {past_n} | Upcoming: {up_n}")
+            # Apply filters (reuse your existing filtering code)
+            filt = mode_var.get()
+            sessions2 = []
+            for s in sessions:
+                st = _session_status(s)
+                if filt == "Past" and st != "past":
+                    continue
+                if filt == "Upcoming" and st not in ("upcoming", "running"):
+                    continue
+                if not _month_scope_ok(s):
+                    continue
+                sessions2.append(s)
 
-        # Render grouped by month
-        last_month = None
-        for s in sessions2:
-            ym = s["date"][:7]  # YYYY-MM
-            if ym != last_month:
-                last_month = ym
-                # Month header + gray line
-                mh = ctk.CTkFrame(scroll, fg_color="transparent")
-                mh.pack(fill="x", padx=8, pady=(14, 6))
+            # Stats update (reuse your existing stats calculation)
+            past_n = sum(1 for s in sessions if _session_status(s) == "past")
+            up_n = sum(1 for s in sessions if _session_status(s) in ("upcoming", "running"))
+            stats_lbl.configure(text=f"Total: {len(sessions)} | Past: {past_n} | Upcoming: {up_n}")
 
-                ctk.CTkLabel(mh, text=ym, font=("Arial", 14, "bold")).pack(side="left")
-                line = ctk.CTkFrame(scroll, height=2, fg_color="#E5E7EB")
-                line.pack(fill="x", padx=8, pady=(0, 10))
+            # Render in batches to keep UI responsive
+            state = {"i": 0}
+            batch_size = 12
 
-            st = _session_status(s)
+            def render_batch():
+                i = state["i"]
+                end = min(i + batch_size, len(sessions2))
 
-            # Color logic
-            bg = "#FFFFFF"
-            if st == "upcoming":
-                bg = "#DCFCE7"   # green
-            elif st == "running":
-                bg = "#FEF3C7"   # amber
-            else:
-                # past: if attendance taken, color green/red by absences; else gray
-                p = present_counts.get(s["id"], 0)
-                if p > 0:
-                    absent = max(0, total_students - p)
-                    bg = "#DCFCE7" if absent == 0 else "#FEE2E2"
+                for k in range(i, end):
+                    s = sessions2[k]
+                    # If you used `last_month` variable for headers, store it in dict
+                    # and update it inside render_one() or here.
+                    render_one(s, present_counts, total_students)
+
+                state["i"] = end
+
+                if end < len(sessions2):
+                    top.after(1, render_batch)
                 else:
-                    bg = "#F3F4F6"
+                    stop_loading()
 
-            card = ctk.CTkFrame(scroll, fg_color=bg, corner_radius=12)
-            card.pack(fill="x", padx=8, pady=6)
+            render_batch()
 
-            row = ctk.CTkFrame(card, fg_color="transparent")
-            row.pack(fill="x", padx=10, pady=10)
+        except Exception as e:
+            stop_loading()
+            messagebox.showerror("Load Error", str(e))
 
-            # Click area (LEFT) => review. Buttons on RIGHT won't collide.
-            left = ctk.CTkFrame(row, fg_color="transparent")
-            left.pack(side="left", fill="x", expand=True)
-
-            # Weekday text
-            try:
-                from datetime import datetime as _dt
-                wd = _dt.strptime(s["date"], "%Y-%m-%d").strftime("%A")
-            except Exception:
-                wd = ""
-
-            date_lbl = ctk.CTkLabel(left, text=f"{s['date']}  ({wd})", font=("Arial", 13, "bold"))
-            time_lbl = ctk.CTkLabel(left, text=f"{s['start_time']} → {s['end_time']}", font=("Arial", 12))
-            date_lbl.pack(anchor="w")
-            time_lbl.pack(anchor="w")
-
-            # Attendance line (past only + only if taken)
-            if st == "past":
-                p = present_counts.get(s["id"], 0)
-                if p > 0:
-                    absent = max(0, total_students - p)
-                    ctk.CTkLabel(left, text=f"Present: {p}   |   Absent: {absent}", font=("Arial", 12)).pack(anchor="w")
-
-            def _bind_click(w):
-                w.bind("<Button-1>", lambda _e, sid=s["id"], ss=s: _open_review(sid, ss))
-                w.bind("<Double-1>", lambda _e, sid=s["id"], ss=s: _open_review(sid, ss))
-
-            _bind_click(left); _bind_click(date_lbl); _bind_click(time_lbl)
-
-            # Buttons (RIGHT): View / Edit / Delete — do NOT collide with left click
-            right = ctk.CTkFrame(row, fg_color="transparent")
-            right.pack(side="right")
-
-            if st == "past":
-                ctk.CTkButton(right, text="👁", width=38, command=lambda sid=s["id"], ss=s: _open_review(sid, ss)).pack(side="left", padx=3)
-
-            ctk.CTkButton(right, text="✎", width=38, command=lambda ss=s: _open_edit_session_modal(ss)).pack(side="left", padx=3)
-            ctk.CTkButton(right, text="✕", width=38, fg_color="#EF4444", hover_color="#B91C1C",
-                         command=lambda ss=s: _delete_session(ss)).pack(side="left", padx=3)
-
-    # refresh when filters change
     def _on_filter(_=None):
         refresh()
 
