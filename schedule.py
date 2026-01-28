@@ -106,6 +106,56 @@ def init_attendance_tables() -> None:
         """
     )
 
+    # 6) Temporary schedule overrides (date ranges that override base schedule)
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS group_schedule_overrides (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id    INTEGER NOT NULL,
+            start_date  TEXT NOT NULL,   -- YYYY-MM-DD
+            end_date    TEXT NOT NULL,   -- YYYY-MM-DD
+            FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE
+        )
+        """
+    )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS group_override_days (
+            override_id INTEGER NOT NULL,
+            weekday     INTEGER NOT NULL CHECK(weekday BETWEEN 0 AND 6),
+            start_time  TEXT NOT NULL,
+            end_time    TEXT NOT NULL,
+            UNIQUE(override_id, weekday),
+            FOREIGN KEY(override_id) REFERENCES group_schedule_overrides(id) ON DELETE CASCADE
+        )
+        """
+    )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS group_override_exclusions (
+            override_id INTEGER NOT NULL,
+            date        TEXT NOT NULL,   -- YYYY-MM-DD
+            UNIQUE(override_id, date),
+            FOREIGN KEY(override_id) REFERENCES group_schedule_overrides(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+    # Ensure sessions has temporary metadata columns (SQLite needs explicit ALTER)
+    c.execute("PRAGMA table_info(sessions)")
+    cols = {row[1] for row in c.fetchall()}
+    if "is_temporary" not in cols:
+        c.execute("ALTER TABLE sessions ADD COLUMN is_temporary INTEGER NOT NULL DEFAULT 0")
+    if "override_id" not in cols:
+        c.execute("ALTER TABLE sessions ADD COLUMN override_id INTEGER")
+
+    c.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sessions_override
+        ON sessions(override_id)
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -180,10 +230,8 @@ def _bind_mousewheel_local(scrollable: ctk.CTkScrollableFrame):
 # Public: plugin attach
 # ----------------------------
 
-def attach_group_schedule_extension(
-    parent_frame,
-    initial_data: dict | None = None,
-):
+def attach_group_schedule_extension(parent_frame, initial_data: dict | None = None, show_mode_toggle: bool = False):
+
     """
     Build the schedule UI inside parent_frame.
 
@@ -230,19 +278,42 @@ def attach_group_schedule_extension(
 
     _bind_mousewheel_local(card)
 
+    # --- Permanent vs Temporary (edit-group only)
+    mode_var = tk.StringVar(value="permanent")
+
+    mode_frame = ctk.CTkFrame(card, fg_color="transparent")
+    if show_mode_toggle:
+        mode_frame.pack(fill="x", padx=12, pady=(12, 0))
+        ctk.CTkLabel(mode_frame, text="Apply changes:", font=("Arial", 12, "bold")).pack(side="left")
+        ctk.CTkRadioButton(mode_frame, text="Permanent", variable=mode_var, value="permanent").pack(side="left", padx=(12, 0))
+        ctk.CTkRadioButton(mode_frame, text="Temporary", variable=mode_var, value="temporary").pack(side="left", padx=(12, 0))
+
     # --- Date range
     range_frame = ctk.CTkFrame(card, fg_color="transparent")
     range_frame.pack(fill="x", padx=12, pady=(12, 6))
     range_frame.grid_columnconfigure(1, weight=1)
     range_frame.grid_columnconfigure(3, weight=1)
 
-    ctk.CTkLabel(range_frame, text="Start Date (YYYY-MM-DD):").grid(row=0, column=0, sticky="w", padx=(0, 8))
+    start_label = ctk.CTkLabel(range_frame, text="Start Date (YYYY-MM-DD):")
+    start_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
     start_entry = ctk.CTkEntry(range_frame, width=140)
     start_entry.grid(row=0, column=1, sticky="ew")
 
-    ctk.CTkLabel(range_frame, text="End Date (YYYY-MM-DD):").grid(row=0, column=2, sticky="w", padx=(12, 8))
+    end_label = ctk.CTkLabel(range_frame, text="End Date (YYYY-MM-DD):")
+    end_label.grid(row=0, column=2, sticky="w", padx=(12, 8))
     end_entry = ctk.CTkEntry(range_frame, width=140)
     end_entry.grid(row=0, column=3, sticky="ew")
+
+    def _on_mode_change(*_):
+        if mode_var.get() == "temporary":
+            start_label.configure(text="Temporary Start Date (YYYY-MM-DD):")
+            end_label.configure(text="Temporary End Date (YYYY-MM-DD):")
+        else:
+            start_label.configure(text="Start Date (YYYY-MM-DD):")
+            end_label.configure(text="End Date (YYYY-MM-DD):")
+
+    mode_var.trace_add("write", _on_mode_change)
+    _on_mode_change()
 
     # Defaults
     today = date.today()
@@ -444,6 +515,7 @@ def attach_group_schedule_extension(
         If shown => return dict payload (for now; later DB save).
         """
         payload = _collect_payload(for_preview=False)
+        payload["mode"] = mode_var.get() if show_mode_toggle else "permanent"
         if not payload:
             return None
         payload.pop("_sd", None)
@@ -670,15 +742,25 @@ def get_group_sessions(group_id: int) -> list[dict]:
     try:
         cur.execute(
             """
-            SELECT id, date, start_time, end_time
+            SELECT id, date, start_time, end_time,
+                COALESCE(is_temporary, 0) AS is_temporary,
+                override_id
             FROM sessions
             WHERE group_id = ?
             ORDER BY date ASC, start_time ASC
             """,
             (group_id,),
         )
+
         return [
-            {"id": int(r[0]), "date": r[1], "start_time": r[2], "end_time": r[3]}
+            {
+                "id": int(r[0]),
+                "date": r[1],
+                "start_time": r[2],
+                "end_time": r[3],
+                "is_temporary": int(r[4]),
+                "override_id": (int(r[5]) if r[5] is not None else None),
+            }
             for r in cur.fetchall()
         ]
     finally:
@@ -1138,6 +1220,9 @@ def open_view_sessions(
         lbl2 = ctk.CTkLabel(left, text=f"{sess['start_time']} – {sess['end_time']}   ·   {status}", font=("Arial", 12), anchor="w")
         lbl2.pack(anchor="w", pady=(2, 0))
 
+        if sess.get("is_temporary"):
+            ctk.CTkLabel(left, text="temporarily", font=("Arial", 21), anchor="w").pack(anchor="w", pady=(2, 0))
+
         # Attendance summary (past sessions): default absent = total - present
         if status == "past" and total_students > 0:
             sid = int(sess["id"])
@@ -1325,9 +1410,9 @@ def _has_running_session(cur: sqlite3.Cursor, group_id: int, now_dt: datetime) -
 
 
 def _delete_future_sessions(cur: sqlite3.Cursor, group_id: int, now_dt: datetime) -> None:
-    """Delete future sessions only (keep past sessions intact)."""
-    today = now_dt.strftime("%Y-%m-%d")
-    now_t = now_dt.strftime("%H:%M")
+    cutoff_dt = now_dt + timedelta(minutes=30)
+    today = cutoff_dt.date().strftime("%Y-%m-%d")
+    now_t = cutoff_dt.strftime("%H:%M")
     cur.execute(
         """
         DELETE FROM sessions
@@ -1346,7 +1431,9 @@ def save_group_schedule_and_regenerate_edit(group_id: int, payload: dict | None)
     """
     conn = _get_conn()
     cur = conn.cursor()
-    now_dt = datetime.now()
+    cutoff_dt = now_dt + timedelta(minutes=30)
+    today = cutoff_dt.date()
+    now_t = cutoff_dt.strftime("%H:%M")
 
     try:
         if _has_running_session(cur, group_id, now_dt):
@@ -1869,3 +1956,289 @@ def open_student_attendance_record(parent: tk.Misc | None, group_id: int, studen
             ctk.CTkLabel(box, text=str(r["day"]), font=("Arial", 12, "bold"), text_color="white").place(
                 relx=0.5, rely=0.5, anchor="center"
             )
+
+# ---------------------------------------------------------------------------
+# Temporary schedule overrides (stored + range regen)
+# ---------------------------------------------------------------------------
+
+def _delete_sessions_in_range_after_cutoff(
+    cur: sqlite3.Cursor,
+    group_id: int,
+    start_date: str,
+    end_date: str,
+    now_dt: datetime,
+) -> int:
+    """Delete sessions inside [start_date, end_date] that start AFTER (now + 30min)."""
+    cutoff_dt = now_dt + timedelta(minutes=30)
+    cdate = cutoff_dt.date().strftime("%Y-%m-%d")
+    ctime = cutoff_dt.strftime("%H:%M")
+
+    cur.execute(
+        """
+        DELETE FROM sessions
+        WHERE group_id = ?
+          AND date >= ?
+          AND date <= ?
+          AND (date > ? OR (date = ? AND start_time > ?))
+        """,
+        (group_id, start_date, end_date, cdate, cdate, ctime),
+    )
+    return cur.rowcount
+
+
+def _get_override_rules(cur: sqlite3.Cursor, override_id: int) -> tuple[dict, list[str]]:
+    """Return (days_map, exclusions) for an override."""
+    cur.execute(
+        "SELECT weekday, start_time, end_time FROM group_override_days WHERE override_id = ?",
+        (override_id,),
+    )
+    days = {}
+    for r in cur.fetchall():
+        w = int(r[0])
+        days[w] = {"enabled": True, "start": r[1], "end": r[2]}
+
+    cur.execute(
+        "SELECT date FROM group_override_exclusions WHERE override_id = ? ORDER BY date",
+        (override_id,),
+    )
+    exclusions = [r[0] for r in cur.fetchall()]
+    return days, exclusions
+
+
+def _replace_override_exclusions(cur: sqlite3.Cursor, override_id: int, exclusions: list[str]) -> None:
+    cur.execute("DELETE FROM group_override_exclusions WHERE override_id = ?", (override_id,))
+    ex_rows = [(override_id, d.strip()) for d in exclusions if d.strip()]
+    if ex_rows:
+        cur.executemany(
+            "INSERT INTO group_override_exclusions (override_id, date) VALUES (?, ?)",
+            ex_rows,
+        )
+
+
+def _create_override(
+    cur: sqlite3.Cursor,
+    group_id: int,
+    start_date: str,
+    end_date: str,
+    days_map: dict,
+    exclusions: list[str],
+) -> int:
+    cur.execute(
+        "INSERT INTO group_schedule_overrides (group_id, start_date, end_date) VALUES (?, ?, ?)",
+        (group_id, start_date, end_date),
+    )
+    override_id = int(cur.lastrowid)
+
+    day_rows = []
+    for wday, info in days_map.items():
+        w = int(wday)
+        if info.get("enabled"):
+            day_rows.append((override_id, w, info["start"].strip(), info["end"].strip()))
+    if day_rows:
+        cur.executemany(
+            "INSERT INTO group_override_days (override_id, weekday, start_time, end_time) VALUES (?, ?, ?, ?)",
+            day_rows,
+        )
+
+    _replace_override_exclusions(cur, override_id, exclusions)
+    return override_id
+
+
+def _regenerate_override_future(
+    cur: sqlite3.Cursor,
+    group_id: int,
+    override_id: int,
+    start_date: str,
+    end_date: str,
+    days_map: dict,
+    exclusions: list[str],
+    now_dt: datetime,
+) -> None:
+    """Delete+recreate future sessions in range using override rules; mark as temporary."""
+    _delete_sessions_in_range_after_cutoff(cur, group_id, start_date, end_date, now_dt)
+
+    cutoff_dt = now_dt + timedelta(minutes=30)
+    cutoff_date = cutoff_dt.date()
+    cutoff_time = cutoff_dt.strftime("%H:%M")
+
+    weekday_time = {
+        int(w): (info["start"].strip(), info["end"].strip())
+        for w, info in days_map.items()
+        if info.get("enabled")
+    }
+    selected_weekdays = set(weekday_time.keys())
+    excluded_set = set([d.strip() for d in exclusions if d.strip()])
+
+    if not selected_weekdays:
+        return
+
+    sd = datetime.strptime(start_date, "%Y-%m-%d").date()
+    ed = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+    session_rows = []
+    d = sd
+    while d <= ed:
+        ds = d.strftime("%Y-%m-%d")
+        if d.weekday() in selected_weekdays and ds not in excluded_set:
+            st, et = weekday_time[d.weekday()]
+            if d > cutoff_date or (d == cutoff_date and st > cutoff_time):
+                session_rows.append((group_id, ds, st, et, 1, override_id))
+        d += timedelta(days=1)
+
+    if session_rows:
+        cur.executemany(
+            """
+            INSERT INTO sessions (group_id, date, start_time, end_time, is_temporary, override_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            session_rows,
+        )
+
+
+def save_temporary_override_and_regenerate_edit(group_id: int, payload: dict) -> None:
+    """Create a temporary override range and regenerate only that range (future-only)."""
+    conn = _get_conn()
+    cur = conn.cursor()
+    now_dt = datetime.now()
+
+    try:
+        if _has_running_session(cur, group_id, now_dt):
+            raise RuntimeError(
+                "This group has a session running right now. "
+                "Please wait until it ends before editing the group."
+            )
+
+        start_date = payload["start_date"]
+        end_date = payload["end_date"]
+        days_map = payload["days"]
+        exclusions = payload.get("exclusions", [])
+
+        new_start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        new_end = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+        # Adjust existing overrides to remove overlap with [new_start, new_end]
+        cur.execute(
+            """
+            SELECT id, start_date, end_date
+            FROM group_schedule_overrides
+            WHERE group_id = ?
+              AND NOT (end_date < ? OR start_date > ?)
+            ORDER BY start_date ASC
+            """,
+            (group_id, start_date, end_date),
+        )
+        overlaps = [(int(r[0]), r[1], r[2]) for r in cur.fetchall()]
+
+        for oid, osd, oed in overlaps:
+            old_start = datetime.strptime(osd, "%Y-%m-%d").date()
+            old_end = datetime.strptime(oed, "%Y-%m-%d").date()
+
+            old_days, old_exclusions = _get_override_rules(cur, oid)
+
+            # Fully covered => delete
+            if old_start >= new_start and old_end <= new_end:
+                cur.execute("DELETE FROM group_schedule_overrides WHERE id = ?", (oid,))
+                continue
+
+            # Split (old spans across new)
+            if old_start < new_start and old_end > new_end:
+                left_end = new_start - timedelta(days=1)
+                cur.execute(
+                    "UPDATE group_schedule_overrides SET end_date = ? WHERE id = ?",
+                    (left_end.strftime("%Y-%m-%d"), oid),
+                )
+                left_ex = [d for d in old_exclusions
+                           if old_start <= datetime.strptime(d, "%Y-%m-%d").date() <= left_end]
+                _replace_override_exclusions(cur, oid, left_ex)
+
+                right_start = new_end + timedelta(days=1)
+                right_end = old_end
+                if right_start <= right_end:
+                    right_ex = [d for d in old_exclusions
+                                if right_start <= datetime.strptime(d, "%Y-%m-%d").date() <= right_end]
+                    new_oid = _create_override(
+                        cur,
+                        group_id,
+                        right_start.strftime("%Y-%m-%d"),
+                        right_end.strftime("%Y-%m-%d"),
+                        old_days,
+                        right_ex,
+                    )
+                    _regenerate_override_future(
+                        cur,
+                        group_id,
+                        new_oid,
+                        right_start.strftime("%Y-%m-%d"),
+                        right_end.strftime("%Y-%m-%d"),
+                        old_days,
+                        right_ex,
+                        now_dt,
+                    )
+                continue
+
+            # Overlap on tail
+            if old_start < new_start <= old_end <= new_end:
+                new_old_end = new_start - timedelta(days=1)
+                if new_old_end < old_start:
+                    cur.execute("DELETE FROM group_schedule_overrides WHERE id = ?", (oid,))
+                else:
+                    cur.execute(
+                        "UPDATE group_schedule_overrides SET end_date = ? WHERE id = ?",
+                        (new_old_end.strftime("%Y-%m-%d"), oid),
+                    )
+                    left_ex = [d for d in old_exclusions
+                               if old_start <= datetime.strptime(d, "%Y-%m-%d").date() <= new_old_end]
+                    _replace_override_exclusions(cur, oid, left_ex)
+                continue
+
+            # Overlap on head
+            if new_start <= old_start <= new_end < old_end:
+                new_old_start = new_end + timedelta(days=1)
+                if new_old_start > old_end:
+                    cur.execute("DELETE FROM group_schedule_overrides WHERE id = ?", (oid,))
+                else:
+                    cur.execute(
+                        "UPDATE group_schedule_overrides SET start_date = ? WHERE id = ?",
+                        (new_old_start.strftime("%Y-%m-%d"), oid),
+                    )
+                    right_ex = [d for d in old_exclusions
+                                if new_old_start <= datetime.strptime(d, "%Y-%m-%d").date() <= old_end]
+                    _replace_override_exclusions(cur, oid, right_ex)
+                continue
+
+        override_id = _create_override(cur, group_id, start_date, end_date, days_map, exclusions)
+        _regenerate_override_future(cur, group_id, override_id, start_date, end_date, days_map, exclusions, now_dt)
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def apply_overrides_future(group_id: int) -> None:
+    """Re-apply all overrides (future-only) so they win over base regeneration."""
+    conn = _get_conn()
+    cur = conn.cursor()
+    now_dt = datetime.now()
+
+    try:
+        cur.execute(
+            """
+            SELECT id, start_date, end_date
+            FROM group_schedule_overrides
+            WHERE group_id = ?
+            ORDER BY start_date ASC
+            """,
+            (group_id,),
+        )
+        rows = [(int(r[0]), r[1], r[2]) for r in cur.fetchall()]
+        for oid, sd, ed in rows:
+            days_map, exclusions = _get_override_rules(cur, oid)
+            _regenerate_override_future(cur, group_id, oid, sd, ed, days_map, exclusions, now_dt)
+
+        conn.commit()
+    finally:
+        conn.close()

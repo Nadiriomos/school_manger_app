@@ -530,6 +530,7 @@ def open_edit_group(group_id: int, parent=None):
     schedule_validate, schedule_apply = schedule.attach_group_schedule_extension(
         ext_zone,
         initial_data=initial_schedule or {},
+        show_mode_toggle=True,
     )
 
     btn_frame = ctk.CTkFrame(container, fg_color="transparent")
@@ -564,11 +565,17 @@ def open_edit_group(group_id: int, parent=None):
             messagebox.showerror("DB Error", str(e))
             return
 
-        # Save schedule + regenerate future only (blocks if running)
+        schedule_payload = schedule_apply() if schedule_apply else None
+
         try:
-            schedule.save_group_schedule_and_regenerate_edit(group_id, schedule_payload)
+            mode = (schedule_payload or {}).get("mode", "permanent")
+            if mode == "temporary":
+                schedule.save_temporary_override_and_regenerate_edit(group_id, schedule_payload)
+            else:
+                schedule.save_group_schedule_and_regenerate_edit(group_id, schedule_payload)
+                schedule.apply_overrides_future(group_id)
         except Exception as e:
-            messagebox.showerror("Schedule Error", f"{e}")
+            messagebox.showerror("Schedule Error", f"Schedule update failed:\n{e}")
             return
 
         messagebox.showinfo("Edited", f"Group '{new_name}' updated.")
