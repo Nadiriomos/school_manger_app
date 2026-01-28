@@ -42,6 +42,13 @@ def resource_path(relative_path: str) -> str:
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
+def refresh_groups_tree():
+    try:
+        if not groups_tree.winfo_exists():
+            return
+        groups_tree.delete(*groups_tree.get_children())
+    except tk.TclError:
+        return
 
 # ---------------------------------------------------------------------------
 # Global style / constants
@@ -475,6 +482,104 @@ def open_add_group(parent=None):
 
     return top
 
+def open_edit_group(group_id: int, parent=None):
+    top = ctk.CTkToplevel(parent or ElNajahSchool)
+    top.title("Edit Group")
+    top.geometry("565x620")
+
+    try:
+        top.grab_set()
+    except tk.TclError:
+        top.focus_force()
+    top.focus_force()
+
+    # Load current group name + schedule (no new DB funcs)
+    try:
+        import sqlite3
+        from DB import DB_PATH
+
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM groups WHERE id = ?", (group_id,))
+        row = cur.fetchone()
+        conn.close()
+
+        if not row:
+            messagebox.showerror("Not found", f"Group {group_id} not found.")
+            top.destroy()
+            return None
+
+        group_name = row[0]
+        initial_schedule = schedule.get_group_schedule_payload(group_id)
+    except Exception as e:
+        messagebox.showerror("DB Error", f"Could not load group:\n{e}")
+        top.destroy()
+        return None
+
+    container = ctk.CTkFrame(top, fg_color="transparent")
+    container.pack(fill="both", expand=True, padx=16, pady=16)
+
+    ctk.CTkLabel(container, text="Edit Group Name:", font=("Arial", 16)).pack(anchor="w", pady=(0, 8))
+    entry = ctk.CTkEntry(container)
+    entry.pack(fill="x", pady=(0, 12))
+    entry.insert(0, group_name)
+
+    ext_zone = ctk.CTkFrame(container, fg_color="transparent")
+    ext_zone.pack(fill="x", pady=(8, 12))
+
+    schedule_validate, schedule_apply = schedule.attach_group_schedule_extension(
+        ext_zone,
+        initial_data=initial_schedule or {},
+    )
+
+    btn_frame = ctk.CTkFrame(container, fg_color="transparent")
+    btn_frame.pack(fill="x", pady=(8, 0))
+
+    def handle_save():
+        import sqlite3
+        from DB import DB_PATH
+
+        new_name = entry.get().strip()
+        if not new_name:
+            messagebox.showerror("Error", "Group name cannot be empty.")
+            return
+
+        if schedule_validate and not schedule_validate():
+            return
+
+        schedule_payload = schedule_apply() if schedule_apply else None
+
+        # Update group name (tiny + local)
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("PRAGMA foreign_keys = ON")
+            cur = conn.cursor()
+            cur.execute("UPDATE groups SET name = ? WHERE id = ?", (new_name, group_id))
+            conn.commit()
+            conn.close()
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Duplicate Name", "Another group already has that name.")
+            return
+        except Exception as e:
+            messagebox.showerror("DB Error", str(e))
+            return
+
+        # Save schedule + regenerate future only (blocks if running)
+        try:
+            schedule.save_group_schedule_and_regenerate_edit(group_id, schedule_payload)
+        except Exception as e:
+            messagebox.showerror("Schedule Error", f"{e}")
+            return
+
+        messagebox.showinfo("Edited", f"Group '{new_name}' updated.")
+        top.destroy()
+        refresh_all()
+
+    ctk.CTkButton(btn_frame, text="Save", command=handle_save, fg_color=PRIMARY, hover_color=HOVER).pack(side="left", padx=4)
+    ctk.CTkButton(btn_frame, text="Cancel", command=top.destroy).pack(side="left", padx=4)
+
+    return top
+
 def open_delete_group(parent=None, preset_group_name: str | None = None, skip_popup: bool = False):
     # If caller already has the group name, skip the entry popup entirely.
     if skip_popup and preset_group_name:
@@ -540,7 +645,7 @@ def delete_group_flow(group_name: str, parent=None):
 def open_manage_groups():
     win = ctk.CTkToplevel(ElNajahSchool)
     win.title("Manage Groups")
-    win.geometry("760x480")
+    win.geometry("760x520")
 
     try:
         win.grab_set()
@@ -549,21 +654,20 @@ def open_manage_groups():
     win.focus_force()
 
     root = ctk.CTkFrame(win, fg_color="transparent")
-    root.pack(fill="both", expand=True, padx=12, pady=12)
+    root.pack(fill="both", expand=True)
 
-    # Left panel (buttons)
-    left = ctk.CTkFrame(root, width=180, fg_color="white")
-    left.pack(side="left", fill="y", padx=(0, 10))
+    # Left panel (actions)
+    left = ctk.CTkFrame(root, width=180, fg_color="transparent")
+    left.pack(side="left", fill="y", padx=(10, 0), pady=10)
     left.pack_propagate(False)
 
-    ctk.CTkLabel(left, text="Groups", font=("Arial", 16, "bold")).pack(pady=(14, 10))
+    ctk.CTkLabel(left, text="Groups", font=("Arial", 18, "bold")).pack(pady=(14, 10))
 
     # Right panel (tree)
     right = ctk.CTkFrame(root, fg_color="white")
-    right.pack(side="left", fill="both", expand=True)
+    right.pack(side="left", fill="both", expand=True, padx=(10, 10), pady=10)
 
     groups_tree = ttk.Treeview(right, columns=("id", "group", "count"), show="headings")
-
     groups_tree.heading("id", text="ID")
     groups_tree.heading("group", text="Group")
     groups_tree.heading("count", text="Students")
@@ -578,6 +682,16 @@ def open_manage_groups():
     groups_tree.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
     yscroll.pack(side="left", fill="y", pady=10, padx=(0, 10))
 
+    def _get_groups_with_ids():
+        import sqlite3
+        from DB import DB_PATH
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT id, name FROM groups ORDER BY name COLLATE NOCASE")
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+
     def refresh_groups_tree():
         groups_tree.delete(*groups_tree.get_children())
 
@@ -590,16 +704,6 @@ def open_manage_groups():
 
         for gid, gname in _get_groups_with_ids():
             groups_tree.insert("", "end", values=(gid, gname, counts_map.get(gname, 0)))
-
-    def _get_groups_with_ids():
-        import sqlite3
-        from DB import DB_PATH
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT id, name FROM groups ORDER BY name COLLATE NOCASE")
-        rows = cur.fetchall()
-        conn.close()
-        return rows
 
     def selected_group():
         sel = groups_tree.selection()
@@ -622,8 +726,42 @@ def open_manage_groups():
         refresh_groups_tree()
         refresh_all()
 
+    def on_edit():
+        gid, _ = selected_group()
+        if not gid:
+            messagebox.showerror("No selection", "Select a group to edit.")
+            return
+
+        child = open_edit_group(gid, parent=win)
+        try:
+            win.wait_window(child)
+        except Exception:
+            pass
+
+        refresh_groups_tree()
+        refresh_all()
+
+    def on_view_sessions():
+        gid, _ = selected_group()
+        if not gid:
+            messagebox.showerror("No selection", "Select a group first.")
+            return
+
+        child = schedule.open_view_sessions(gid, parent=win)
+        try:
+            win.wait_window(child)
+        except Exception:
+            pass
+
+        # ✅ If Manage Groups window was closed while sessions was open, stop here
+        if not win.winfo_exists():
+            return
+
+        refresh_groups_tree()
+        refresh_all()
+
     def on_delete():
-        _gid, name = selected_group()
+        gid, name = selected_group()
         if not name:
             messagebox.showerror("No selection", "Select a group to delete.")
             return
@@ -633,30 +771,26 @@ def open_manage_groups():
             preset_group_name=name,
             skip_popup=True
         )
-
         if deleted:
             refresh_groups_tree()
             refresh_all()
 
-    def on_view_sessions():
-        gid, _name = selected_group()
-        if not gid:
-            messagebox.showerror("No selection", "Select a group first.")
-            return
-        schedule.open_view_sessions(gid, parent=win, primary=PRIMARY, hover=HOVER)
+    ctk.CTkButton(left, text="Add Group", command=on_add,
+                  fg_color=PRIMARY, hover_color=HOVER).pack(fill="x", padx=10, pady=(0, 8))
 
-    ctk.CTkButton(left, text="Add Group", command=on_add, fg_color=PRIMARY, hover_color=HOVER).pack(
-        fill="x", padx=10, pady=(0, 8)
-    )
-    ctk.CTkButton(left, text="View Sessions", command=on_view_sessions, fg_color="green", hover_color=HOVER).pack(
-        fill="x", padx=10, pady=(0, 8)
-    )
-    ctk.CTkButton(left, text="Delete Group", command=on_delete, fg_color="#DC2626", hover_color="#B91C1C").pack(
-        fill="x", padx=10, pady=(0, 8)
-    )
+    ctk.CTkButton(left, text="Edit Group", command=on_edit,
+                  fg_color="green", hover_color=HOVER).pack(fill="x", padx=10, pady=(0, 8))
+
+    ctk.CTkButton(left, text="View Sessions", command=on_view_sessions,
+                  fg_color="green", hover_color=HOVER).pack(fill="x", padx=10, pady=(0, 8))
+
+    ctk.CTkButton(left, text="Delete Group", command=on_delete,
+                  fg_color="#DC2626", hover_color="#B91C1C").pack(fill="x", padx=10, pady=(0, 8))
+
     ctk.CTkButton(left, text="Close", command=win.destroy).pack(fill="x", padx=10, pady=(18, 0))
 
     refresh_groups_tree()
+    return win
 
 
 def open_edit_student_modal():
@@ -929,6 +1063,14 @@ export_menu.add_command(label="Export Unpaid Students to PDF", command=menu_tool
 export_menu.add_command(label="Export Student Count to PDF", command=menu_tools.export_student_count_pdf)
 export_menu.add_command(label="Export Student Payment History to PDF", command=menu_tools.export_student_payment_history_pdf)
 menubar.add_cascade(label="Export", menu=export_menu)
+
+# Schedule menu
+schedule_menu = Menu(menubar, tearoff=0)
+schedule_menu.add_command(
+    label="Student Attendance Record",
+    command=lambda: schedule.open_student_attendance_tool(ElNajahSchool),
+)
+menubar.add_cascade(label="Schedule", menu=schedule_menu)
 
 # Help menu
 help_menu = Menu(menubar, tearoff=0)

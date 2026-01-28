@@ -7,7 +7,7 @@ import tkinter as tk
 from tkinter import messagebox
 
 from datetime import datetime, date, timedelta
-
+from collections import defaultdict
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -1138,16 +1138,16 @@ def open_view_sessions(
         lbl2 = ctk.CTkLabel(left, text=f"{sess['start_time']} – {sess['end_time']}   ·   {status}", font=("Arial", 12), anchor="w")
         lbl2.pack(anchor="w", pady=(2, 0))
 
-        # Attendance summary (only show for past sessions)
+        # Attendance summary (past sessions): default absent = total - present
         if status == "past" and total_students > 0:
-            present = int(present_counts.get(int(sess["id"]), 0))
-            # If there's no attendance rows, treat it as "not taken"
-            if int(sess["id"]) in present_counts:
-                absent = max(0, total_students - present)
-                lbl3 = ctk.CTkLabel(left, text=f"Present: {present}   Absent: {absent}   Total: {total_students}", font=("Arial", 12))
-            else:
-                lbl3 = ctk.CTkLabel(left, text=f"Attendance: not taken   Total: {total_students}", font=("Arial", 12))
-            lbl3.pack(anchor="w", pady=(6, 0))
+            sid = int(sess["id"])
+            present = int(present_counts.get(sid, 0))   # 0 if no rows -> nobody present
+            absent = max(0, total_students - present)
+            ctk.CTkLabel(
+                left,
+                text=f"Present: {present}   Absent: {absent}   Total: {total_students}",
+                font=("Arial", 12),
+            ).pack(anchor="w", pady=(6, 0))
 
         # Clickable review area (labels only; avoids colliding with edit/delete buttons)
         def _review(_e=None):
@@ -1267,3 +1267,605 @@ def open_view_sessions(
     month_menu.configure(command=_on_filter)
 
     refresh()
+
+# ---------------------------------------------------------------------------
+# Edit-group save policy: keep past sessions, regenerate future only
+# ---------------------------------------------------------------------------
+
+def get_group_schedule_payload(group_id: int) -> dict | None:
+    """Return schedule payload for attach_group_schedule_extension(initial_data=...).
+    Returns None if no schedule exists for that group.
+    """
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT start_date, end_date FROM group_schedules WHERE group_id = ?",
+            (group_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+
+        payload = {"start_date": row[0], "end_date": row[1], "days": {}, "exclusions": []}
+
+        cur.execute(
+            "SELECT weekday, start_time, end_time FROM group_schedule_days WHERE group_id = ?",
+            (group_id,),
+        )
+        for wday, st, et in cur.fetchall():
+            payload["days"][int(wday)] = {"enabled": True, "start": st, "end": et}
+
+        cur.execute(
+            "SELECT date FROM group_schedule_exclusions WHERE group_id = ? ORDER BY date",
+            (group_id,),
+        )
+        payload["exclusions"] = [r[0] for r in cur.fetchall()]
+        return payload
+    finally:
+        conn.close()
+
+
+def _has_running_session(cur: sqlite3.Cursor, group_id: int, now_dt: datetime) -> bool:
+    today = now_dt.strftime("%Y-%m-%d")
+    now_t = now_dt.strftime("%H:%M")
+    cur.execute(
+        """
+        SELECT 1
+        FROM sessions
+        WHERE group_id = ?
+          AND date = ?
+          AND start_time <= ?
+          AND end_time  > ?
+        LIMIT 1
+        """,
+        (group_id, today, now_t, now_t),
+    )
+    return cur.fetchone() is not None
+
+
+def _delete_future_sessions(cur: sqlite3.Cursor, group_id: int, now_dt: datetime) -> None:
+    """Delete future sessions only (keep past sessions intact)."""
+    today = now_dt.strftime("%Y-%m-%d")
+    now_t = now_dt.strftime("%H:%M")
+    cur.execute(
+        """
+        DELETE FROM sessions
+        WHERE group_id = ?
+          AND (date > ? OR (date = ? AND start_time > ?))
+        """,
+        (group_id, today, today, now_t),
+    )
+
+
+def save_group_schedule_and_regenerate_edit(group_id: int, payload: dict | None) -> None:
+    """Edit-group save: keep past sessions, regenerate only future sessions.
+    - Blocks if a session is running right now for that group.
+    - Updates schedule tables.
+    - Deletes future sessions, generates future ones based on new schedule.
+    """
+    conn = _get_conn()
+    cur = conn.cursor()
+    now_dt = datetime.now()
+
+    try:
+        if _has_running_session(cur, group_id, now_dt):
+            raise RuntimeError(
+                "This group has a session running right now. Please wait until it ends before editing."
+            )
+
+        # If schedule removed: wipe schedule tables but keep past sessions
+        if not payload:
+            cur.execute("DELETE FROM group_schedule_days WHERE group_id = ?", (group_id,))
+            cur.execute("DELETE FROM group_schedule_exclusions WHERE group_id = ?", (group_id,))
+            cur.execute("DELETE FROM group_schedules WHERE group_id = ?", (group_id,))
+            _delete_future_sessions(cur, group_id, now_dt)
+            conn.commit()
+            return
+
+        start_date = payload["start_date"]
+        end_date = payload["end_date"]
+        days_map = payload["days"]
+        exclusions = payload.get("exclusions", [])
+
+        # Upsert schedule range
+        cur.execute(
+            """
+            INSERT INTO group_schedules (group_id, start_date, end_date)
+            VALUES (?, ?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET
+                start_date = excluded.start_date,
+                end_date   = excluded.end_date
+            """,
+            (group_id, start_date, end_date),
+        )
+
+        # Replace weekday rules
+        cur.execute("DELETE FROM group_schedule_days WHERE group_id = ?", (group_id,))
+        day_rows = []
+        for wday, info in days_map.items():
+            wday_int = int(wday)
+            if info.get("enabled"):
+                day_rows.append((group_id, wday_int, info["start"].strip(), info["end"].strip()))
+        if day_rows:
+            cur.executemany(
+                """
+                INSERT INTO group_schedule_days (group_id, weekday, start_time, end_time)
+                VALUES (?, ?, ?, ?)
+                """,
+                day_rows,
+            )
+
+        # Replace exclusions
+        cur.execute("DELETE FROM group_schedule_exclusions WHERE group_id = ?", (group_id,))
+        ex_rows = [(group_id, d.strip()) for d in exclusions if d.strip()]
+        if ex_rows:
+            cur.executemany(
+                "INSERT INTO group_schedule_exclusions (group_id, date) VALUES (?, ?)",
+                ex_rows,
+            )
+
+        # Regenerate future only
+        _delete_future_sessions(cur, group_id, now_dt)
+
+        weekday_time = {
+            int(w): (info["start"].strip(), info["end"].strip())
+            for w, info in days_map.items()
+            if info.get("enabled")
+        }
+        selected_weekdays = set(weekday_time.keys())
+        excluded_set = set(exclusions)
+
+        if selected_weekdays:
+            sd = datetime.strptime(start_date, "%Y-%m-%d").date()
+            ed = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+            today = now_dt.date()
+            now_t = now_dt.strftime("%H:%M")
+
+            session_rows = []
+            d = sd
+            while d <= ed:
+                ds = d.strftime("%Y-%m-%d")
+                if d.weekday() in selected_weekdays and ds not in excluded_set:
+                    st, et = weekday_time[d.weekday()]
+                    # only future sessions
+                    if d > today or (d == today and st > now_t):
+                        session_rows.append((group_id, ds, st, et))
+                d += timedelta(days=1)
+
+            if session_rows:
+                cur.executemany(
+                    """
+                    INSERT INTO sessions (group_id, date, start_time, end_time)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    session_rows,
+                )
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+from collections import defaultdict
+from datetime import datetime, date
+
+def _get_groups_with_ids() -> list[tuple[int, str]]:
+    """[(group_id, group_name), ...] ordered by name."""
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id, name FROM groups ORDER BY name COLLATE NOCASE")
+        return [(int(r[0]), str(r[1])) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def _dt_from_date_time(date_s: str, time_s: str) -> datetime:
+    return datetime.strptime(f"{date_s} {time_s}", "%Y-%m-%d %H:%M")
+
+
+def _get_present_session_ids_for_student(student_id: int, session_ids: list[int]) -> set[int]:
+    """Return set(session_id) where the student has an attendance row."""
+    if not session_ids:
+        return set()
+
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        placeholders = ",".join("?" for _ in session_ids)
+        cur.execute(
+            f"SELECT session_id FROM attendance WHERE student_id = ? AND session_id IN ({placeholders})",
+            [student_id, *session_ids],
+        )
+        return {int(r[0]) for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def get_student_attendance_by_month(group_id: int, student_id: int) -> dict[tuple[int, int], list[dict]]:
+    """
+    Return {(year, month): [{'date':..., 'present':bool, 'session_id':..., 'day':int}, ...], ...}
+
+    Rules (MVP):
+    - only sessions that ended (date+end_time <= now)
+    - only sessions on/after student.join_date
+    - if a session has *no* attendance rows at all => "no record" => skip (don’t show it)
+    """
+    from DB import get_student  # local import to avoid circulars
+
+    now = datetime.now()
+    st = get_student(student_id)
+
+    try:
+        join_d = datetime.strptime(st.join_date, "%Y-%m-%d").date()
+    except Exception:
+        join_d = date.min
+
+    sessions = get_group_sessions(group_id)
+
+    ended_sessions = []
+    for s in sessions:
+        try:
+            sd = datetime.strptime(s["date"], "%Y-%m-%d").date()
+        except Exception:
+            continue
+
+        if sd < join_d:
+            continue
+
+        try:
+            end_dt = _dt_from_date_time(s["date"], s["end_time"])
+        except Exception:
+            continue
+
+        if end_dt <= now:
+            ended_sessions.append(s)
+
+    session_ids = [int(s["id"]) for s in ended_sessions]
+
+    # sessions with any attendance rows (means attendance was taken for that session)
+    taken_counts = get_attendance_counts_for_sessions(session_ids)
+
+    # only check presence inside "taken sessions"
+    present_ids = _get_present_session_ids_for_student(student_id, list(taken_counts.keys()))
+
+    out: dict[tuple[int, int], list[dict]] = defaultdict(list)
+
+    for s in ended_sessions:
+        sid = int(s["id"])
+        if sid not in taken_counts:
+            # teacher never took attendance -> no record -> don't show
+            continue
+
+        y = int(s["date"][0:4])
+        m = int(s["date"][5:7])
+        d = int(s["date"][8:10])
+
+        out[(y, m)].append(
+            {
+                "session_id": sid,
+                "date": s["date"],
+                "day": d,
+                "present": sid in present_ids,
+            }
+        )
+
+    for k in out:
+        out[k].sort(key=lambda r: (r["date"], r["session_id"]))
+
+    return dict(out)
+
+def fetch_student_presence_rows(group_id: int, student_id: int, join_date: str) -> list[dict]:
+    """
+    Returns ended sessions since join_date with present flag:
+    present = 1 if attendance row exists, else 0 (ABSENT).
+    """
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    now_t = now.strftime("%H:%M")
+
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT
+                s.id,
+                s.date,
+                s.start_time,
+                s.end_time,
+                CASE WHEN a.student_id IS NULL THEN 0 ELSE 1 END AS present
+            FROM sessions s
+            LEFT JOIN attendance a
+                ON a.session_id = s.id AND a.student_id = ?
+            WHERE s.group_id = ?
+              AND s.date >= ?
+              AND (s.date < ? OR (s.date = ? AND s.end_time <= ?))
+            ORDER BY s.date ASC, s.start_time ASC
+            """,
+            (student_id, group_id, join_date, today, today, now_t),
+        )
+
+        return [
+            {"session_id": int(r[0]), "date": r[1], "start": r[2], "end": r[3], "present": bool(r[4])}
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+def group_rows_by_month(rows: list[dict]) -> dict[tuple[int,int], list[dict]]:
+    out = defaultdict(list)
+    for r in rows:
+        y = int(r["date"][:4])
+        m = int(r["date"][5:7])
+        r["day"] = int(r["date"][8:10])
+        out[(y, m)].append(r)
+    return dict(out)
+
+def open_student_attendance_tool(parent: tk.Misc | None = None) -> None:
+    """Two-step UI: select (group + student) then show monthly attendance squares."""
+    host = parent
+
+    win = ctk.CTkToplevel(host)
+    win.title("Student Attendance")
+    win.geometry("520x560")
+    if host:
+        try:
+            win.transient(host)
+        except Exception:
+            pass
+
+    # safe modal grab (prevents: grab failed: window not viewable)
+    def _modalize():
+        try:
+            win.update_idletasks()
+            win.after(0, win.grab_set)
+        except tk.TclError:
+            try:
+                win.focus_force()
+            except Exception:
+                pass
+    _modalize()
+
+    def _find_student_by_id():
+        raw = id_entry.get().strip()
+        if not raw:
+            return
+        try:
+            sid = int(raw)
+        except ValueError:
+            messagebox.showerror("Error", "Student ID must be a number.")
+            return
+
+        gid = group_id_map.get(group_name_var.get())
+        students = _get_group_students_by_id(int(gid))
+        hit = next((s for s in students if int(s["id"]) == sid), None)
+        if not hit:
+            messagebox.showerror("Not Found", "This student is not in the selected group.")
+            return
+
+        selected_student_id[0] = sid
+        selected_label.configure(text=f"Selected: {hit['name']} (ID {sid})")
+
+    outer = ctk.CTkFrame(win)
+    outer.pack(fill="both", expand=True, padx=12, pady=12)
+
+    groups = _get_groups_with_ids()
+    if not groups:
+        messagebox.showerror("No Groups", "Create a group first.")
+        win.destroy()
+        return
+
+    group_name_var = tk.StringVar(value=groups[0][1])
+    group_id_map = {name: gid for (gid, name) in groups}
+
+    ctk.CTkLabel(outer, text="Select group:", font=("Arial", 14)).pack(anchor="w")
+    group_menu = ctk.CTkOptionMenu(outer, values=[g[1] for g in groups], variable=group_name_var)
+    group_menu.pack(fill="x", pady=(4, 10))
+
+    row = ctk.CTkFrame(outer, fg_color="transparent")
+    row.pack(fill="x", pady=(0, 10))
+    ctk.CTkLabel(row, text="Student ID:", width=90).pack(side="left")
+    id_entry = ctk.CTkEntry(row, placeholder_text="type id (optional)")
+    id_entry.pack(side="left", fill="x", expand=True)
+    ctk.CTkButton(row, text="Find", width=70, command=_find_student_by_id).pack(side="left", padx=(6, 0))
+
+    selected_student_id: list[int | None] = [None]
+    selected_label = ctk.CTkLabel(outer, text="Selected: (none)")
+    selected_label.pack(anchor="w", pady=(0, 6))
+
+    list_box = ctk.CTkScrollableFrame(outer, height=310)
+    list_box.pack(fill="both", expand=True)
+
+    def _select_student(sid: int, name: str):
+        selected_student_id[0] = sid
+        selected_label.configure(text=f"Selected: {name} (ID {sid})")
+
+    def _reload_students(*_):
+        for w in list_box.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
+
+        gid = group_id_map.get(group_name_var.get())
+        if gid is None:
+            return
+
+        students = _get_group_students_by_id(int(gid))
+        if not students:
+            ctk.CTkLabel(list_box, text="(No students in this group yet)").pack(anchor="w", padx=6, pady=6)
+            return
+
+        for s in students:
+            sid = int(s["id"])
+            name = str(s["name"])
+            ctk.CTkButton(
+                list_box,
+                text=f"{name}   (ID {sid})",
+                fg_color="#374151",
+                hover_color="#4B5563",
+                anchor="w",
+                command=lambda _sid=sid, _name=name: _select_student(_sid, _name),
+            ).pack(fill="x", padx=6, pady=3)
+
+    _reload_students()
+    group_menu.configure(command=lambda _v: _reload_students())
+
+    btn_row = ctk.CTkFrame(outer, fg_color="transparent")
+    btn_row.pack(fill="x", pady=(10, 0))
+
+    def _open():
+        gid = group_id_map.get(group_name_var.get())
+        if gid is None:
+            messagebox.showerror("Error", "Please select a group.")
+            return
+
+        sid: int | None
+        raw = id_entry.get().strip()
+        if raw:
+            try:
+                sid = int(raw)
+            except ValueError:
+                messagebox.showerror("Error", "Student ID must be a number.")
+                return
+        else:
+            sid = selected_student_id[0]
+
+        if sid is None:
+            messagebox.showerror("Error", "Pick a student (or type an ID).")
+            return
+
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
+        open_student_attendance_record(parent=host, group_id=int(gid), student_id=int(sid))
+
+    ctk.CTkButton(btn_row, text="Open Record", command=_open, fg_color="#16A34A", hover_color="#15803D").pack(
+        side="left", padx=4
+    )
+    ctk.CTkButton(btn_row, text="Cancel", command=win.destroy).pack(side="left", padx=4)
+
+
+def open_student_attendance_record(parent: tk.Misc | None, group_id: int, student_id: int) -> None:
+    """Second step window: horizontal months, colored squares."""
+    from DB import get_student, NotFoundError
+
+    try:
+        st = get_student(student_id)
+    except NotFoundError as e:
+        messagebox.showerror("Not Found", str(e))
+        return
+
+    rows = fetch_student_presence_rows(group_id, student_id, st.join_date)
+    data = group_rows_by_month(rows)
+    
+    win = ctk.CTkToplevel(parent)
+    win.title(f"Attendance: {st.name} (ID {st.id})")
+    win.geometry("980x600")
+    if parent:
+        try:
+            win.transient(parent)
+        except Exception:
+            pass
+
+    def _modalize():
+        try:
+            win.update_idletasks()
+            win.after(0, win.grab_set)
+        except tk.TclError:
+            try:
+                win.focus_force()
+            except Exception:
+                pass
+    _modalize()
+
+    outer = ctk.CTkFrame(win)
+    outer.pack(fill="both", expand=True, padx=12, pady=12)
+
+    top = ctk.CTkFrame(outer, fg_color="transparent")
+    top.pack(fill="x")
+
+    total_p = sum(1 for month in data.values() for r in month if r["present"])
+    total_a = sum(1 for month in data.values() for r in month if not r["present"])
+
+    ctk.CTkLabel(
+        top,
+        text=f"{st.name}  •  Present: {total_p}   Absent: {total_a}",
+        font=("Arial", 16, "bold"),
+    ).pack(side="left")
+
+    legend = ctk.CTkFrame(top, fg_color="transparent")
+    legend.pack(side="right")
+    ctk.CTkFrame(legend, width=16, height=16, fg_color="#22C55E").pack(side="left", padx=(0, 6))
+    ctk.CTkLabel(legend, text="Present").pack(side="left", padx=(0, 14))
+    ctk.CTkFrame(legend, width=16, height=16, fg_color="#9CA3AF").pack(side="left", padx=(0, 6))
+    ctk.CTkLabel(legend, text="Absent").pack(side="left")
+
+    wrap = ctk.CTkFrame(outer)
+    wrap.pack(fill="both", expand=True, pady=(10, 0))
+
+    canvas = tk.Canvas(wrap, highlightthickness=0)
+    canvas.pack(side="top", fill="both", expand=True)
+
+    xbar = tk.Scrollbar(wrap, orient="horizontal", command=canvas.xview)
+    xbar.pack(side="bottom", fill="x")
+    canvas.configure(xscrollcommand=xbar.set)
+
+    inner = ctk.CTkFrame(canvas)
+    win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+    def _on_inner_config(_event=None):
+        try:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        except Exception:
+            pass
+
+    inner.bind("<Configure>", _on_inner_config)
+
+    def _on_canvas_config(event):
+        try:
+            canvas.itemconfigure(win_id, height=event.height)
+        except Exception:
+            pass
+
+    canvas.bind("<Configure>", _on_canvas_config)
+
+    if not data:
+        ctk.CTkLabel(inner, text="No attendance records yet for this student.").pack(padx=20, pady=20)
+        return
+
+    months_sorted = sorted(data.keys())  # (y, m)
+    for (y, m) in months_sorted:
+        month_rows = data[(y, m)]
+        if not month_rows:
+            continue
+
+        month_name = datetime(y, m, 1).strftime("%B %Y")
+        present_cnt = sum(1 for r in month_rows if r["present"])
+        absent_cnt = sum(1 for r in month_rows if not r["present"])
+
+        card = ctk.CTkFrame(inner, width=280)
+        card.pack(side="left", fill="y", padx=10, pady=10)
+
+        ctk.CTkLabel(card, text=month_name, font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(10, 0))
+        ctk.CTkLabel(card, text=f"P:{present_cnt}  A:{absent_cnt}").pack(anchor="w", padx=10, pady=(0, 8))
+
+        grid = ctk.CTkFrame(card, fg_color="transparent")
+        grid.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        cols = 5
+        for i, r in enumerate(month_rows):
+            fg = "#22C55E" if r["present"] else "#9CA3AF"
+            box = ctk.CTkFrame(grid, width=46, height=36, fg_color=fg, corner_radius=8)
+            box.grid(row=i // cols, column=i % cols, padx=4, pady=4)
+            box.grid_propagate(False)
+            ctk.CTkLabel(box, text=str(r["day"]), font=("Arial", 12, "bold"), text_color="white").place(
+                relx=0.5, rely=0.5, anchor="center"
+            )
