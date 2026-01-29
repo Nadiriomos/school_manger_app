@@ -280,23 +280,9 @@ class _OverlayCard:
         # keep refs for later
         self._row = row
         self._left = left
+        self._face_lbl = None
 
         self.set_status("neutral", "QR Reader: waiting…")
-
-        # --- NEW: refresh face photo ---
-        if self._face_lbl is not None:
-            try:
-                self._face_lbl.destroy()
-            except Exception:
-                pass
-            self._face_lbl = None
-
-        if res.student_id:
-            self._face_lbl = attach_student_face_if_exists(
-                self._row,
-                res.student_id,
-                before_widget=self._left,   # ensures photo is left of text
-            )
 
     def set_status(self, kind: str, text: str):
         colors = {
@@ -311,6 +297,21 @@ class _OverlayCard:
 
     def update(self, res: ScanResult):
         self.set_status(res.kind, res.title)
+
+        # --- show face photo if exists (for green/orange/red) ---
+        if getattr(self, "_face_lbl", None) is not None:
+            try:
+                self._face_lbl.destroy()
+            except Exception:
+                pass
+            self._face_lbl = None
+
+        if res.student_id:
+            self._face_lbl = attach_student_face_if_exists(
+                self._row,
+                res.student_id,
+                before_widget=self._left,   # photo stays left of text
+            )
 
         if res.student_id:
             self.name_lbl.configure(text=f"{res.student_name}  ·  ID {res.student_id}")
