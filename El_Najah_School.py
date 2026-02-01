@@ -115,6 +115,7 @@ top_frame.pack(side="top", fill="x", padx=16, pady=(10, 4))
 _now = datetime.now()
 years = [str(y) for y in range(_now.year - 2, _now.year + 3)]
 year_var = ctk.StringVar(value=str(_now.year))
+qr_code.PHOTO_YEAR_PROVIDER = lambda: int(year_var.get())
 
 year_label = ctk.CTkLabel(top_frame, text="Year:", font=("Arial", 14), text_color=TEXT)
 year_label.grid(row=0, column=0, padx=(4, 4), pady=4, sticky="w")

@@ -27,7 +27,7 @@ class ScanResult:
     session_text: str = ""
     payment_text: str = ""
 
-
+PHOTO_YEAR_PROVIDER = lambda: datetime.now().year
 # ----------------------------
 # DB helpers (local, fast)
 # ----------------------------
@@ -164,12 +164,13 @@ def attach_student_face_if_exists(
 
     # IMPORTANT: use the folder where this file lives (not current working dir)
     base_dir = base_dir or os.path.dirname(os.path.abspath(__file__))  # CHANGED
-    year = year or datetime.now().year
+    year = year or int(PHOTO_YEAR_PROVIDER())
 
     photo_path = os.path.join(base_dir, "photos", str(year), f"{student_id}.jpg")
     if not os.path.exists(photo_path):
         return None
 
+    print("PHOTO TRY:", photo_path, os.path.exists(photo_path))
     try:
         pil = Image.open(photo_path).convert("RGB")
         pil.thumbnail(size)
@@ -246,7 +247,7 @@ class _OverlayCard:
 
         self.card = ctk.CTkFrame(root, fg_color="white", corner_radius=16)
         # overlay bottom-right
-        self.card.place(relx=1.0, rely=1.0, anchor="se", x=-14, y=-14)
+        self.card.place(relx=1.0, rely=1.0, anchor="se", x=-14, y=-90)
 
         self.badge = ctk.CTkFrame(self.card, fg_color="#111827", corner_radius=12)
         self.badge.pack(fill="x", padx=12, pady=(12, 8))
@@ -313,6 +314,11 @@ class _OverlayCard:
                 before_widget=self._left,   # photo stays left of text
             )
 
+        if self._face_lbl is not None:
+            # pack "before=" is unreliable in CTk, so force correct order:
+            self._left.pack_forget()
+            self._left.pack(side="left", fill="x", expand=True)
+      
         if res.student_id:
             self.name_lbl.configure(text=f"{res.student_name}  ·  ID {res.student_id}")
         else:

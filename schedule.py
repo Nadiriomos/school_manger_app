@@ -515,16 +515,17 @@ def attach_group_schedule_extension(parent_frame, initial_data: dict | None = No
         If shown => return dict payload (for now; later DB save).
         """
         payload = _collect_payload(for_preview=False)
-        payload["mode"] = mode_var.get() if show_mode_toggle else "permanent"
         if not payload:
             return None
+
+        payload["mode"] = mode_var.get() if show_mode_toggle else "permanent"
+
         payload.pop("_sd", None)
         payload.pop("_ed", None)
         payload.pop("_selected_weekdays", None)
         payload.pop("_ex_set", None)
         return payload
 
-    return validate_fn, apply_fn
 
 def save_group_schedule_and_regenerate(group_id: int, payload: dict | None) -> None:
     """
@@ -1431,6 +1432,7 @@ def save_group_schedule_and_regenerate_edit(group_id: int, payload: dict | None)
     """
     conn = _get_conn()
     cur = conn.cursor()
+    now_dt = datetime.now()
     cutoff_dt = now_dt + timedelta(minutes=30)
     today = cutoff_dt.date()
     now_t = cutoff_dt.strftime("%H:%M")
