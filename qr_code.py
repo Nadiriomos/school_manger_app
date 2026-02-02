@@ -139,56 +139,6 @@ def _dt_from(date_str: str, hhmm: str) -> datetime:
     dt = datetime.strptime(f"{date_str} {hhmm}", "%Y-%m-%d %H:%M")
     return dt
 
-import os
-from datetime import datetime
-import customtkinter as ctk
-
-try:
-    from PIL import Image
-except Exception:
-    Image = None
-
-
-def attach_student_face_if_exists(
-    parent: ctk.CTkBaseClass,
-    student_id: int,
-    *,
-    base_dir: str | None = None,
-    year: int | None = None,
-    size: tuple[int, int] = (110, 110),
-    before_widget=None,   # NEW
-) -> ctk.CTkLabel | None:
-
-    if Image is None:
-        return None
-
-    # IMPORTANT: use the folder where this file lives (not current working dir)
-    base_dir = base_dir or os.path.dirname(os.path.abspath(__file__))  # CHANGED
-    year = year or int(PHOTO_YEAR_PROVIDER())
-
-    photo_path = os.path.join(base_dir, "photos", str(year), f"{student_id}.jpg")
-    if not os.path.exists(photo_path):
-        return None
-
-    print("PHOTO TRY:", photo_path, os.path.exists(photo_path))
-    try:
-        pil = Image.open(photo_path).convert("RGB")
-        pil.thumbnail(size)
-        img = ctk.CTkImage(light_image=pil, dark_image=pil, size=size)
-
-        lbl = ctk.CTkLabel(parent, text="", image=img)
-        lbl._img_ref = img  # keep reference alive
-
-        if before_widget is not None:
-            lbl.pack(side="left", padx=(0, 10), pady=6, before=before_widget)
-        else:
-            lbl.pack(side="left", padx=(0, 10), pady=6)
-
-        return lbl
-    except Exception:
-        return None
-
-
 # ----------------------------
 # UI: Toast + Overlay Card
 # ----------------------------

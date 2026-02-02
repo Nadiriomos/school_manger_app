@@ -6,7 +6,6 @@ import sys
 from datetime import datetime
 
 import qr_code 
-import student_photo
 # Data / DB layer
 from DB import (
     init_db,
@@ -339,16 +338,6 @@ def open_add_student():
     name_entry = ctk.CTkEntry(form)
     name_entry.grid(row=3, column=0, sticky="ew", pady=(0, 8))
 
-    # photo 
-    ext_zone = ctk.CTkFrame(form, fg_color="transparent")
-    ext_zone.grid(row=4, column=0, sticky="ew", pady=(8, 12))
-
-    photo_plugin = student_photo.attach_add_student_photo_extension(
-        ext_zone,
-        lambda: id_entry.get(),
-        base_dir=None
-    )
-
     # Payment status for current filter month
     pay_frame = ctk.CTkFrame(form, fg_color="transparent")
     pay_frame.grid(row=5, column=0, sticky="n", pady=(4, 8))
@@ -399,17 +388,9 @@ def open_add_student():
                 return
             manual_id = int(id_text)
 
-        # NEW: if photo pending, require ID
-        if photo_plugin.pending is not None and manual_id is None:
-            messagebox.showerror("Missing ID", "You took a photo. Please enter Student ID before saving.")
-            return
-
         selected_groups = [g for g, var in group_vars.items() if var.get()]
         year, month = _current_year_month()
         pay_status = pay_var.get() or "unpaid"
-
-        if not photo_plugin.validate_before_save():
-            return
 
         try:
             sid = create_student(name=name, student_id=manual_id)
@@ -421,10 +402,7 @@ def open_add_student():
         except DBError as e:
             messagebox.showerror("Database Error", str(e))
             return
-        
-        if not photo_plugin.save_after_student_saved():
-            return
-        
+
         messagebox.showinfo("Student Added", f"Student '{name}' added with ID {sid}.")
         top.destroy()
         refresh_all()
