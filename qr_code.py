@@ -257,12 +257,6 @@ class _OverlayCard:
                 pass
             self._face_lbl = None
 
-        if res.student_id:
-            self._face_lbl = attach_student_face_if_exists(
-                self._row,
-                res.student_id,
-                before_widget=self._left,   # photo stays left of text
-            )
 
         if self._face_lbl is not None:
             # pack "before=" is unreliable in CTk, so force correct order:
