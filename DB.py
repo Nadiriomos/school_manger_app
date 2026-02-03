@@ -6,7 +6,7 @@ from datetime import datetime, date
 from typing import Iterable, Optional, Sequence
 
 DB_PATH = "elnajah.db"
-
+PAYMENT_BECAME_PAID_HOOK = None
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -602,38 +602,84 @@ def upsert_payment(
 
     paid must be 'paid' or 'unpaid'.
     payment_date defaults to today if not provided.
+
+    Extra behavior:
+      If this call changes the record from NOT 'paid' -> 'paid',
+      it will invoke an optional global hook named PAYMENT_BECAME_PAID_HOOK:
+
+          PAYMENT_BECAME_PAID_HOOK(student_id, year, month, payment_date)
+
+      This is designed for auto-receipt printing, logging, etc.
     """
     if paid not in ("paid", "unpaid"):
         raise DBError("paid must be 'paid' or 'unpaid'.")
+
+    # Optional: sanity checks (safe + helpful)
+    if not isinstance(month, int) or not (1 <= month <= 12):
+        raise DBError("month must be an integer from 1 to 12.")
+    if not isinstance(year, int) or year < 2000 or year > 3000:
+        raise DBError("year looks invalid.")
 
     payment_date = payment_date or _today_str()
 
     conn = _get_conn()
     c = conn.cursor()
+
+    prev_paid: Optional[str] = None
+    committed = False
+
     try:
+        # 1) Read previous state so we can detect unpaid->paid
         c.execute(
-            """
-            INSERT INTO payments (student_id, year, month, paid, payment_date)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(student_id, year, month)
-            DO UPDATE SET paid = excluded.paid,
-                          payment_date = excluded.payment_date
-            """,
-            (student_id, year, month, paid, payment_date),
+            "SELECT paid FROM payments WHERE student_id=? AND year=? AND month=?",
+            (student_id, year, month),
         )
+        row = c.fetchone()
+        prev_paid = row[0] if row else None
+
+        # 2) Write new state
+        try:
+            c.execute(
+                """
+                INSERT INTO payments (student_id, year, month, paid, payment_date)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(student_id, year, month)
+                DO UPDATE SET paid = excluded.paid,
+                              payment_date = excluded.payment_date
+                """,
+                (student_id, year, month, paid, payment_date),
+            )
+        except sqlite3.OperationalError:
+            # Fallback for older SQLite versions (no ON CONFLICT DO UPDATE)
+            c.execute(
+                """
+                REPLACE INTO payments (student_id, year, month, paid, payment_date)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (student_id, year, month, paid, payment_date),
+            )
+
         conn.commit()
-    except sqlite3.OperationalError:
-        # Fallback for older SQLite versions (no ON CONFLICT DO UPDATE)
-        c.execute(
-            """
-            REPLACE INTO payments (student_id, year, month, paid, payment_date)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (student_id, year, month, paid, payment_date),
-        )
-        conn.commit()
+        committed = True
+
+
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        raise DBError(str(e)) from e
+
     finally:
         conn.close()
+
+    # 3) Fire hook AFTER commit (so we never print a receipt for a failed write)
+    if committed and prev_paid != "paid" and paid == "paid":
+        hook = globals().get("PAYMENT_BECAME_PAID_HOOK")
+        if callable(hook):
+            try:
+                hook(student_id, year, month, payment_date)
+            except Exception:
+                # Never let printing/logging crash payment saving
+                pass
+
 
 
 def upsert_payments_bulk(student_id: int, items: Iterable[dict]) -> None:
@@ -642,40 +688,104 @@ def upsert_payments_bulk(student_id: int, items: Iterable[dict]) -> None:
 
     items: iterable of dicts with keys:
         year, month, paid ('paid'|'unpaid'), payment_date ('' or 'YYYY-MM-DD')
+
+    Extra behavior:
+      After a successful commit, if any row changes from NOT 'paid' -> 'paid',
+      call PAYMENT_BECAME_PAID_HOOK(student_id, year, month, payment_date).
     """
-    conn = _get_conn()
-    c = conn.cursor()
+    # Normalize items into a list because we need to scan twice
+    items_list = list(items)
+    if not items_list:
+        return
+
+    # Build rows for executemany + collect (year, month) keys
     rows = []
-    for it in items:
+    keys = []
+    for it in items_list:
         paid = it["paid"]
         if paid not in ("paid", "unpaid"):
             raise DBError("paid must be 'paid' or 'unpaid'.")
+
+        year = int(it["year"])
+        month = int(it["month"])
+        if not (1 <= month <= 12):
+            raise DBError("month must be 1..12.")
+
         payment_date = it.get("payment_date") or _today_str()
-        rows.append(
-            (student_id, it["year"], it["month"], paid, payment_date)
-        )
+
+        rows.append((student_id, year, month, paid, payment_date))
+        keys.append((year, month))
+
+    # Read previous states for the targeted rows
+    conn = _get_conn()
+    c = conn.cursor()
+
+    prev_map = {}  # (year, month) -> prev_paid
+    committed = False
 
     try:
-        c.executemany(
-            """
-            INSERT INTO payments (student_id, year, month, paid, payment_date)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(student_id, year, month)
-            DO UPDATE SET paid = excluded.paid,
-                          payment_date = excluded.payment_date
+        # SQLite doesn't support tuple IN reliably in older versions,
+        # so we build: (year=? AND month=?) OR (year=? AND month=?) ...
+        conds = " OR ".join(["(year=? AND month=?)"] * len(keys))
+        params = [student_id]
+        for (y, m) in keys:
+            params.extend([y, m])
+
+        c.execute(
+            f"""
+            SELECT year, month, paid
+            FROM payments
+            WHERE student_id=?
+              AND ({conds})
             """,
-            rows,
+            params,
         )
-    except sqlite3.OperationalError:
-        c.executemany(
-            """
-            REPLACE INTO payments (student_id, year, month, paid, payment_date)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-    conn.commit()
-    conn.close()
+        for y, m, p in c.fetchall():
+            prev_map[(int(y), int(m))] = p
+
+        # Bulk upsert
+        try:
+            c.executemany(
+                """
+                INSERT INTO payments (student_id, year, month, paid, payment_date)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(student_id, year, month)
+                DO UPDATE SET paid = excluded.paid,
+                              payment_date = excluded.payment_date
+                """,
+                rows,
+            )
+        except sqlite3.OperationalError:
+            c.executemany(
+                """
+                REPLACE INTO payments (student_id, year, month, paid, payment_date)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+        conn.commit()
+        committed = True
+
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        raise DBError(str(e)) from e
+
+    finally:
+        conn.close()
+
+    # Fire hook AFTER commit (never print/log on failed write)
+    if committed:
+        hook = globals().get("PAYMENT_BECAME_PAID_HOOK")
+        if callable(hook):
+            for (_sid, y, m, paid, pdate) in rows:
+                prev_paid = prev_map.get((y, m))
+                if prev_paid != "paid" and paid == "paid":
+                    try:
+                        hook(student_id, y, m, pdate)
+                    except Exception:
+                        # Never let printing/logging crash the bulk save
+                        pass
 
 
 def get_payment(student_id: int, year: int, month: int) -> Optional[Payment]:

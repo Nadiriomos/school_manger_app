@@ -29,7 +29,8 @@ from DB import (
 import menu_tools
 import payments_log
 import schedule
-
+import DB as DBmod
+import receipt_printer
 
 # ---------------------------------------------------------------------------
 # Utility helpers
@@ -81,6 +82,8 @@ _last_deleted_id = None
 
 init_db()  # ensure DB schema exists
 schedule.init_attendance_tables()
+DBmod.PAYMENT_BECAME_PAID_HOOK = receipt_printer.on_payment_became_paid
+receipt_printer.start_worker_once()
 
 ElNajahSchool = ctk.CTk()
 ElNajahSchool.title("El Najah School Manager")
