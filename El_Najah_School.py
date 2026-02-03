@@ -1078,11 +1078,13 @@ menubar.add_cascade(label="Export", menu=export_menu)
 
 # Schedule menu
 schedule_menu = Menu(menubar, tearoff=0)
-schedule_menu.add_command(
-    label="Student Attendance Record",
-    command=lambda: schedule.open_student_attendance_tool(ElNajahSchool),
-)
+schedule_menu.add_command(label="Student Attendance Record", command=lambda: schedule.open_student_attendance_tool(ElNajahSchool))
 menubar.add_cascade(label="Schedule", menu=schedule_menu)
+
+# Qr_code menu
+qr_code_menu = Menu(menubar, tearoff=0)
+qr_code_menu.add_command(label="genrate qr codes",command=lambda: schedule.open_student_attendance_tool(ElNajahSchool))
+menubar.add_cascade(label="Qr code", menu=qr_code_menu)
 
 # Help menu
 help_menu = Menu(menubar, tearoff=0)
