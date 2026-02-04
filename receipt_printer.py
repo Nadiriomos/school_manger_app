@@ -39,7 +39,7 @@ PRINTER_PORT = 9100
 WINDOWS_PRINTER_NAME = "XP-Q80H"
 
 # Receipt text labels (easy to change, Arabic allowed)
-SCHOOL_NAME = "El Najah School"
+SCHOOL_NAME = "Rajah Mohammed pour la physique"
 PLACE_LINE = ""  # optional second line
 PAID_LABEL = "PAID"  # you can change to Arabic: "مدفوع"
 

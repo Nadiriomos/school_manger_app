@@ -31,6 +31,7 @@ import payments_log
 import schedule
 import DB as DBmod
 import receipt_printer
+import qr_generator
 
 # ---------------------------------------------------------------------------
 # Utility helpers
@@ -1086,7 +1087,7 @@ menubar.add_cascade(label="Schedule", menu=schedule_menu)
 
 # Qr_code menu
 qr_code_menu = Menu(menubar, tearoff=0)
-qr_code_menu.add_command(label="genrate qr codes",command=lambda: schedule.open_student_attendance_tool(ElNajahSchool))
+qr_code_menu.add_command(label="genrate qr codes",command=lambda: schedule.generate_blank_sheet_pdf(ElNajahSchool))
 menubar.add_cascade(label="Qr code", menu=qr_code_menu)
 
 # Help menu
