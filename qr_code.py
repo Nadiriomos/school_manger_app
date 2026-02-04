@@ -150,6 +150,7 @@ class _Toast:
 
         colors = {
             "green": ("#16A34A", "white"),
+            "yellow": ("#FCD34D", "black"),  
             "orange": ("#F59E0B", "black"),
             "red": ("#EF4444", "white"),
         }
@@ -240,6 +241,7 @@ class _OverlayCard:
             "neutral": ("#111827", "white"),
             "green": ("#16A34A", "white"),
             "orange": ("#F59E0B", "black"),
+            "yellow": ("#FCD34D", "black"),
             "red": ("#EF4444", "white"),
         }
         bg, fg = colors.get(kind, ("#111827", "white"))
@@ -315,6 +317,9 @@ class QRSessionScanner:
             if kind == "green":
                 winsound.Beep(1200, 90)
                 winsound.Beep(1500, 90)
+            elif kind == "yellow":
+                winsound.Beep(950, 90)
+                winsound.Beep(1250, 90)
             elif kind == "orange":
                 winsound.Beep(700, 140)
             elif kind == "red":
@@ -324,7 +329,12 @@ class QRSessionScanner:
                 winsound.MessageBeep()
             return
         except Exception:
-            pass
+            try:
+                self.root.bell()
+                if kind == "yellow":
+                    self.root.after(120, self.root.bell)
+            except Exception:
+                pass
 
         try:
             self.root.bell()
@@ -560,15 +570,17 @@ class QRSessionScanner:
 
         if already_all:
             res = ScanResult(
-                kind="green",
-                title="Already checked-in",
-                subtitle="Duplicate scan ignored.",
+                kind="yellow",
+                title="Duplicate ID",
+                subtitle="Already checked-in. Duplicate scan ignored.",
                 student_name=stu.name,
                 student_id=stu.id,
                 groups=groups_str,
                 session_text=sess_txt,
                 payment_text=pay_txt,
             )
+            beep_kind = "yellow"
+            toast_kind = "yellow"
         else:
             res = ScanResult(
                 kind="green",
@@ -580,11 +592,12 @@ class QRSessionScanner:
                 session_text=sess_txt,
                 payment_text=pay_txt,
             )
+            beep_kind = "green"
+            toast_kind = "green"
 
         self.card.update(res)
-        self._beep("green")
-        self._toast("green", res.title, res.subtitle)
-
+        self._beep(beep_kind)
+        self._toast(toast_kind, res.title, res.subtitle)
 
 # ----------------------------
 # Public install function

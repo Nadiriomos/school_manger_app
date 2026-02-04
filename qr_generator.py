@@ -1,26 +1,10 @@
-"""
-qr_code_generator_step2_numbers.py — Step 2 (place base card + print numbers)
-
-What changed from Step 1:
-- We DO print a number for each card.
-- We DO allow partial last page:
-  If the range is not divisible by 10, the remaining slots on the last sheet are left EMPTY (no card).
-
-Still NOT doing QR overlay yet — that's Step 3.
-
-How to set coordinates for the number:
-- NUMBER_XY_MM is (x_mm, y_mm) measured from the *bottom-left corner of the card*.
-- Start with the default and tweak, print one sheet, adjust again.
-- Turn DEBUG_GUIDES = True to draw a red border + green crosshair at the number point.
-
-Run:
-    python qr_code_generator_step2_numbers.py
-"""
-
 from __future__ import annotations
 
 import os
 from tkinter import Tk, messagebox, simpledialog
+from tkinter import Tk, messagebox, simpledialog, Toplevel, Button, Label
+import re
+from datetime import datetime
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
@@ -34,11 +18,12 @@ from reportlab.graphics import renderPDF
 # Layout config (20×30 cm, 10-up)
 # ---------------------------------------------------------------------
 PAGE_MM = (200.0, 300.0)        # 20×30 cm
-CARD_MM = (86.0, 54.0)          # 8.6×5.4 cm (LANDSCAPE)
+CARD_MM = (90.0, 58.0)          # 8.6×5.4 cm (LANDSCAPE)
 COLS, ROWS = 2, 5               # 10 slots per page
 
 # Gap between cards (you said you want to increase this)
-GAP_MM = 7.0                    # try 3 or 4
+GAP_X_MM = 7.0   # keep gap between columns
+GAP_Y_MM = 0.0   # remove gap between rows
 
 # Shift ONLY the base cards (mm). Negative x => left.
 CARD_OFFSET_MM = (-90.0, 0.0)     # e.g. (-3.0, 0.0)
@@ -49,7 +34,7 @@ FONT_NAME = "Helvetica-Bold"
 FONT_SIZE_PT = 14
 
 # >>> This is what you will tune <<<
-NUMBER_XY_MM = (78.0, 27.0)
+NUMBER_XY_MM = (86.0, 27.0)
 
 # Shift the entire grid (mm). Use this to nudge everything left/right/up/down.
 # Example: (-3.0, 0.0) moves the whole layout 3mm to the LEFT.
@@ -71,7 +56,7 @@ PRINT_QR = True
 
 # QR placement INSIDE THE SLOT GRID (NOT tied to card offset)
 # (x_mm, y_mm, size_mm) measured from the *slot's* bottom-left corner
-QR_BOX_MM = (36.5, 8.6, 36.95)   # start guess: you will adjust
+QR_BOX_MM = (43, 11, 36.95)   # start guess: you will adjust
 
 # QR colors
 QR_INVERT = True  # True = white QR on blue background
@@ -83,26 +68,36 @@ QR_ERROR_LEVEL = "M"      # L/M/Q/H (M good default)
 QR_BORDER_MODULES = 4     # quiet zone (keep 4)
 
 
-def ask_range_popup() -> tuple[int, int] | None:
-    root = Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
+def ask_range_popup(parent=None) -> tuple[int, int] | None:
+    temp_root = None
 
-    start = simpledialog.askinteger("QR Cards", "From what number? (start)", parent=root)
+    # If called from app menu, parent will be your CTk root (good).
+    # If called standalone, we create a temporary root.
+    if parent is None:
+        temp_root = Tk()
+        temp_root.withdraw()
+        try:
+            temp_root.attributes("-topmost", True)
+        except Exception:
+            pass
+        parent = temp_root
+
+    start = simpledialog.askinteger("QR Cards", "From what number? (start)", parent=parent)
     if start is None:
-        root.destroy()
+        if temp_root: temp_root.destroy()
         return None
 
-    end = simpledialog.askinteger("QR Cards", "To what number? (end)", parent=root)
+    end = simpledialog.askinteger("QR Cards", "To what number? (end)", parent=parent)
     if end is None:
-        root.destroy()
+        if temp_root: temp_root.destroy()
         return None
 
     if end < start:
-        messagebox.showwarning("QR Cards", "End is smaller than start. I will swap them.")
+        messagebox.showwarning("QR Cards", "End is smaller than start. I will swap them.", parent=parent)
         start, end = end, start
 
-    root.destroy()
+    if temp_root:
+        temp_root.destroy()
     return start, end
 
 def draw_qr_on_pdf(c, data: str, x_pt: float, y_pt: float, size_pt: float):
@@ -135,11 +130,11 @@ def draw_qr_on_pdf(c, data: str, x_pt: float, y_pt: float, size_pt: float):
 
     renderPDF.draw(d, c, x_pt, y_pt)
 
-def _compute_centered_margins_mm(page_mm=PAGE_MM, card_mm=CARD_MM, cols=COLS, rows=ROWS, gap_mm=GAP_MM):
+def _compute_centered_margins_mm(page_mm=PAGE_MM, card_mm=CARD_MM, cols=COLS, rows=ROWS, GAP_X_M=GAP_X_MM, GAP_Y_MM=GAP_Y_MM):
     page_w, page_h = page_mm
     card_w, card_h = card_mm
-    grid_w = cols * card_w + (cols - 1) * gap_mm
-    grid_h = rows * card_h + (rows - 1) * gap_mm
+    grid_w = cols * card_w + (cols - 1) * GAP_X_MM
+    grid_h = rows * card_h + (rows - 1) * GAP_Y_MM
     if grid_w > page_w or grid_h > page_h:
         raise ValueError(
             f"Grid doesn't fit: grid={grid_w:.1f}x{grid_h:.1f}mm "
@@ -152,8 +147,8 @@ def _slot_xy_mm(r: int, col: int, margin_x_mm: float, margin_y_mm: float) -> tup
     """Return bottom-left of slot in mm (no offsets)."""
     page_w_mm, page_h_mm = PAGE_MM
     card_w_mm, card_h_mm = CARD_MM
-    x_mm = margin_x_mm + col * (card_w_mm + GAP_MM)
-    y_mm = page_h_mm - margin_y_mm - card_h_mm - r * (card_h_mm + GAP_MM)
+    x_mm = margin_x_mm + col * (card_w_mm + GAP_X_MM)
+    y_mm = page_h_mm - margin_y_mm - card_h_mm - r * (card_h_mm + GAP_Y_MM)
     return x_mm, y_mm
 
 
@@ -333,6 +328,237 @@ def main():
     )
     messagebox.showinfo("QR Cards", msg)
     root.destroy()
+
+def open_qr_generator(parent=None):
+    rng = ask_range_popup(parent)
+    if rng is None:
+        return
+    start, end = rng
+
+    here = os.path.dirname(__file__)
+    base = os.path.join(here, "base_card.jpg")
+    out = os.path.join(here, f"cards_{start}_to_{end}.pdf")
+
+    try:
+        generate_pdf(base, out, start, end)
+    except Exception as e:
+        messagebox.showerror("QR Cards", f"Error:\n{e}", parent=parent)
+        return
+
+    messagebox.showinfo("QR Cards", f"Saved:\n{out}", parent=parent)
+
+
+def generate_pdf_for_ids(base_card_image_path: str, output_pdf_path: str, ids_list: list[int]) -> str:
+    # reuse your existing generator logic by converting to strings
+    ids = [str(int(n)) for n in sorted(set(ids_list))]
+    if not ids:
+        raise ValueError("No IDs to generate.")
+
+    # ---- copy of generate_pdf BUT replacing the range-created ids with this `ids` ----
+    if not os.path.exists(base_card_image_path):
+        raise FileNotFoundError(base_card_image_path)
+
+    per_page = COLS * ROWS
+    pages = (len(ids) + per_page - 1) // per_page
+
+    margin_x_mm, margin_y_mm = _compute_centered_margins_mm()
+    page_w_mm, page_h_mm = PAGE_MM
+    card_w_mm, card_h_mm = CARD_MM
+
+    c = canvas.Canvas(output_pdf_path, pagesize=(page_w_mm * mm, page_h_mm * mm))
+    img = ImageReader(base_card_image_path)
+    preserve = (FIT_MODE.lower() != "stretch")
+
+    idx = 0
+    for _p in range(pages):
+        for r in range(ROWS):
+            for col in range(COLS):
+                if idx >= len(ids):
+                    continue
+
+                slot_x_mm, slot_y_mm = _slot_xy_mm(r, col, margin_x_mm, margin_y_mm)
+
+                dx_mm, dy_mm = CARD_OFFSET_MM
+                card_x_mm = slot_x_mm + dx_mm
+                card_y_mm = slot_y_mm + dy_mm
+
+                x = card_x_mm * mm
+                y = card_y_mm * mm
+                w = card_w_mm * mm
+                h = card_h_mm * mm
+
+                _draw_card_image(c, img, x, y, w, h, preserve=preserve)
+
+                sid = ids[idx]
+                disp = sid[-DISPLAY_DIGITS:].zfill(DISPLAY_DIGITS)
+
+                nx_in_mm, ny_in_mm = NUMBER_XY_MM
+                if ANCHOR_NUMBERS_TO_CARDS:
+                    nx_mm = card_x_mm + nx_in_mm
+                    ny_mm = card_y_mm + ny_in_mm
+                else:
+                    nx_mm = slot_x_mm + nx_in_mm
+                    ny_mm = slot_y_mm + ny_in_mm
+
+                if PRINT_QR:
+                    qx_mm, qy_mm, qs_mm = QR_BOX_MM
+                    qx = (slot_x_mm + qx_mm) * mm
+                    qy = (slot_y_mm + qy_mm) * mm
+                    qs = qs_mm * mm
+                    draw_qr_on_pdf(c, sid, qx, qy, qs)
+
+                c.setFont(FONT_NAME, FONT_SIZE_PT)
+                c.setFillColor(colors.black)
+                _draw_rotated_centered_text(c, nx_mm * mm, ny_mm * mm, disp, NUMBER_ROTATE_DEG)
+
+                idx += 1
+
+        c.showPage()
+
+    c.save()
+    return output_pdf_path
+
+
+def open_qr_counter(parent=None):
+    # 1) ask expected range
+    rng = ask_range_popup(parent)
+    if rng is None:
+        return
+    start, end = rng
+    expected = set(range(start, end + 1))
+
+    # 2) build popup
+    top = Toplevel(parent)
+    top.title("Check How Many You Have")
+    top.geometry("520x260")
+    try:
+        top.attributes("-topmost", True)
+    except Exception:
+        pass
+
+    scanned: set[int] = set()
+    total_scans = 0
+    dup_scans = 0
+    buf = ""
+    last_t = 0.0
+
+    info = Label(top, text=f"Expected range: {start} → {end}\nScan cards now (scanner + Enter).", justify="left")
+    info.pack(anchor="w", padx=12, pady=(12, 6))
+
+    stat = Label(top, text="Scanned: 0 | Missing: ? | Duplicates: 0 | Last: —", justify="left")
+    stat.pack(anchor="w", padx=12, pady=(0, 10))
+
+    result = Label(top, text="", justify="left")
+    result.pack(anchor="w", padx=12, pady=(0, 10))
+
+    def refresh(last="—"):
+        missing = len(expected) - len(scanned)
+        stat.configure(text=f"Scanned: {len(scanned)} | Missing: {missing} | Duplicates: {dup_scans} | Last: {last}")
+
+    def do_count():
+        missing_list = sorted(expected - scanned)
+        if not missing_list:
+            result.configure(text="✅ No missing cards.")
+            return
+        # show a compact preview (don’t spam UI)
+        preview = ", ".join(f"{n:04d}" for n in missing_list[:40])
+        more = "" if len(missing_list) <= 40 else f" ... (+{len(missing_list)-40} more)"
+        result.configure(text=f"Missing ({len(missing_list)}): {preview}{more}")
+
+    def do_generate_lost():
+        missing_list = sorted(expected - scanned)
+        if not missing_list:
+            messagebox.showinfo("Lost Cards", "No missing cards to generate.", parent=top)
+            return
+
+        here = os.path.dirname(__file__)
+        base = os.path.join(here, "base_card.jpg")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = os.path.join(here, f"lost_cards_{start}_to_{end}_{stamp}.pdf")
+
+        try:
+            generate_pdf_for_ids(base, out, missing_list)
+        except Exception as e:
+            messagebox.showerror("Lost Cards", f"Error:\n{e}", parent=top)
+            return
+
+        messagebox.showinfo("Lost Cards", f"Saved:\n{out}", parent=top)
+
+    def do_reset():
+        nonlocal total_scans, dup_scans, buf
+        scanned.clear()
+        total_scans = 0
+        dup_scans = 0
+        buf = ""
+        result.configure(text="")
+        refresh()
+
+
+    # 3) key capture (prevents qr_code.py global scanner)
+    import time as _time
+    _scanner_gap = 0.20
+
+    def on_key(e):
+        nonlocal buf, last_t, total_scans, dup_scans
+        t = _time.perf_counter()
+        if t - last_t > _scanner_gap:
+            buf = ""
+        last_t = t
+
+        ks = getattr(e, "keysym", "")
+        ch = getattr(e, "char", "")
+
+        if ks == "Return":
+            code = buf.strip()
+            buf = ""
+            m = re.search(r"\d+", code)
+            if not m:
+                refresh(last="—")
+                return "break"
+
+            n = int(m.group())          # IMPORTANT: strips leading zeros automatically
+            disp = f"{n:04d}"           # display as 4 digits
+
+            total_scans += 1
+            if n in scanned:
+                dup_scans += 1
+                top.bell()  # 🔔 small system beep
+                result.configure(text=f"⚠️ Duplicate scan: {disp}")
+                # optional: clear warning after a moment
+                top.after(800, lambda: result.configure(text=""))
+            else:
+                scanned.add(n)
+
+            refresh(last=disp)
+            return "break"
+
+
+        # ignore controls
+        if ks in ("Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Tab", "Escape"):
+            if ks == "Escape":
+                top.destroy()
+            return "break"
+
+        if ch and ch.isprintable() and not ch.isspace():
+            buf += ch
+
+        return "break"  # IMPORTANT: stops propagation to root.bind_all
+
+    top.bind("<KeyPress>", on_key)
+
+    # buttons
+    row = Label(top, text="")
+    row.pack()
+
+    Button(top, text="Count", command=do_count).pack(side="left", padx=10, pady=10)
+    Button(top, text="Generate lost cards", command=do_generate_lost).pack(side="left", padx=10, pady=10)
+    Button(top, text="Reset", command=do_reset).pack(side="left", padx=10, pady=10)
+    Button(top, text="Close", command=top.destroy).pack(side="right", padx=10, pady=10)
+
+    # modal behavior
+    top.grab_set()
+    top.focus_force()
+    refresh()
 
 
 if __name__ == "__main__":
