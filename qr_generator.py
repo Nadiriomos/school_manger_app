@@ -26,7 +26,9 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.lib import colors
-
+from reportlab.graphics.barcode import qr
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics import renderPDF
 
 # ---------------------------------------------------------------------
 # Layout config (20×30 cm, 10-up)
@@ -64,6 +66,22 @@ FIT_MODE = "contain"
 
 ANCHOR_NUMBERS_TO_CARDS = False
 
+# --- QR overlay toggles ---
+PRINT_QR = True
+
+# QR placement INSIDE THE SLOT GRID (NOT tied to card offset)
+# (x_mm, y_mm, size_mm) measured from the *slot's* bottom-left corner
+QR_BOX_MM = (36.5, 8.6, 36.95)   # start guess: you will adjust
+
+# QR colors
+QR_INVERT = True  # True = white QR on blue background
+QR_BG_COLOR = colors.HexColor("#264878") 
+QR_FG_COLOR = colors.white
+
+# QR quality
+QR_ERROR_LEVEL = "M"      # L/M/Q/H (M good default)
+QR_BORDER_MODULES = 4     # quiet zone (keep 4)
+
 
 def ask_range_popup() -> tuple[int, int] | None:
     root = Tk()
@@ -87,6 +105,35 @@ def ask_range_popup() -> tuple[int, int] | None:
     root.destroy()
     return start, end
 
+def draw_qr_on_pdf(c, data: str, x_pt: float, y_pt: float, size_pt: float):
+    """
+    Draw QR at (x_pt, y_pt) with square size size_pt (points).
+    Supports inverted style (white QR on blue background).
+    """
+    # background (for inverted style)
+    if QR_INVERT:
+        c.setFillColor(QR_BG_COLOR)
+        c.rect(x_pt, y_pt, size_pt, size_pt, stroke=0, fill=1)
+        module_color = QR_FG_COLOR
+    else:
+        module_color = colors.black
+
+    w = qr.QrCodeWidget(data, barLevel=QR_ERROR_LEVEL)
+    w.barBorder = QR_BORDER_MODULES
+    w.barFillColor = module_color
+    w.barStrokeColor = module_color
+    w.barStrokeWidth = 0
+
+    # Scale by scaling the Drawing (NOT the widget)
+    x0, y0, x1, y1 = w.getBounds()
+    w_size = (x1 - x0)  # square
+    scale = size_pt / w_size
+
+    d = Drawing(size_pt, size_pt)
+    d.add(w)
+    d.scale(scale, scale)
+
+    renderPDF.draw(d, c, x_pt, y_pt)
 
 def _compute_centered_margins_mm(page_mm=PAGE_MM, card_mm=CARD_MM, cols=COLS, rows=ROWS, gap_mm=GAP_MM):
     page_w, page_h = page_mm
@@ -199,6 +246,16 @@ def generate_pdf(base_card_image_path: str, output_pdf_path: str, start: int, en
                     # numbers stay on the page grid (calibration mode)
                     nx_mm = slot_x_mm + nx_in_mm
                     ny_mm = slot_y_mm + ny_in_mm
+
+                if PRINT_QR:
+                    qx_mm, qy_mm, qs_mm = QR_BOX_MM
+
+                    # IMPORTANT: anchored to SLOT (NOT card offset)
+                    qx = (slot_x_mm + qx_mm) * mm
+                    qy = (slot_y_mm + qy_mm) * mm
+                    qs = qs_mm * mm
+
+                    draw_qr_on_pdf(c, sid, qx, qy, qs)
 
                 nx = nx_mm * mm
                 ny = ny_mm * mm
