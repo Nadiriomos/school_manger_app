@@ -144,7 +144,7 @@ def _dt_from(date_str: str, hhmm: str) -> datetime:
 # ----------------------------
 
 class _Toast:
-    def __init__(self, root: ctk.CTk, kind: str, title: str, subtitle: str, ms: int = 1600):
+    def __init__(self, root: ctk.CTk, kind: str, title: str, subtitle: str, ms: int = 3500):
         self.root = root
         self.ms = ms
 
@@ -163,23 +163,39 @@ class _Toast:
         except Exception:
             pass
 
-        frame = ctk.CTkFrame(top, fg_color=bg, corner_radius=14)
+        frame = ctk.CTkFrame(top, fg_color=bg, corner_radius=18)
         frame.pack(fill="both", expand=True)
 
-        ctk.CTkLabel(frame, text=title, text_color=fg, font=("Arial", 16, "bold")).pack(
-            padx=16, pady=(12, 2), anchor="w"
-        )
-        ctk.CTkLabel(frame, text=subtitle, text_color=fg, font=("Arial", 13)).pack(
-            padx=16, pady=(0, 12), anchor="w"
-        )
+        # ✅ Bigger fonts
+        title_font = ("Arial", 22, "bold")
+        sub_font = ("Arial", 16)
 
-        # place near top-right of main window
+        # ✅ Bigger window
+        w, h = 560, 160
+
+        ctk.CTkLabel(
+            frame,
+            text=title,
+            text_color=fg,
+            font=title_font,
+            wraplength=w - 32,
+            justify="left",
+        ).pack(padx=16, pady=(16, 4), anchor="w")
+
+        ctk.CTkLabel(
+            frame,
+            text=subtitle,
+            text_color=fg,
+            font=sub_font,
+            wraplength=w - 32,
+            justify="left",
+        ).pack(padx=16, pady=(0, 16), anchor="w")
+
+        # center in main window
         root.update_idletasks()
-        w, h = 360, 86
-
-        x = root.winfo_rootx() + (root.winfo_width() - w) // 2
+        x_offset = 140
+        x = root.winfo_rootx() + (root.winfo_width() - w) // 2 + x_offset
         y = root.winfo_rooty() + (root.winfo_height() - h) // 2
-
         top.geometry(f"{w}x{h}+{x}+{y}")
 
         self.top = top
